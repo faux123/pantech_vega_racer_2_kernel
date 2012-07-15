@@ -2181,6 +2181,12 @@ config MSM_CACHE_DUMP
 	  This allows for analysis of the caches in case cache corruption is
 	  suspected.
 
+config GPU_OVERCLOCK
+	bool "Enable GPU Overclocking option"
+	default n
+	help
+	  Adreno2xx overclocking up to 480 MHz
+
 config CPU_OVERCLOCK
 	bool "Enable CPU Overclocking option"
 	default n
