@@ -487,6 +487,9 @@ enum {
 #define SNDRV_PCM_IOCTL_READN_FRAMES	_IOR('A', 0x53, struct snd_xfern)
 #define SNDRV_PCM_IOCTL_LINK		_IOW('A', 0x60, int)
 #define SNDRV_PCM_IOCTL_UNLINK		_IO('A', 0x61)
+#ifdef CONFIG_PANTECH_SND  // NR-jykim
+#define SNDRV_PCM_IOCTL_SET_NR		_IO('A', 0x70)
+#endif
 
 /*****************************************************************************
  *                                                                           *

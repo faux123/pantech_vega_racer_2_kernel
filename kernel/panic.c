@@ -27,13 +27,36 @@
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
 
+/* Machine specific panic information string */
+char *mach_panic_string;
+
 int panic_on_oops;
 static unsigned long tainted_mask;
 static int pause_on_oops;
 static int pause_on_oops_flag;
 static DEFINE_SPINLOCK(pause_on_oops_lock);
 
-int panic_timeout;
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+static char diag_err_msg_buf[0xC8];
+static char dispbuf[1024];
+static int *panic_magic; 
+static int backup_reg[18]={0};
+
+extern void apainc_kernel_stack_dump_end(void);
+extern void pantech_errlog_display_put_log(const char *log, int size);
+extern void pantech_errlog_display_get_log(char *log, int size);
+
+#if 0//!defined(FEATURE_SW_RESET_RELEASE_MODE)
+extern void pantech_errlog_check_powerkey( void );
+#endif
+
+extern void pantech_machine_crash_shutdown(struct pt_regs *regs);
+#endif
+
+#ifndef CONFIG_PANIC_TIMEOUT
+#define CONFIG_PANIC_TIMEOUT 0
+#endif
+int panic_timeout = CONFIG_PANIC_TIMEOUT;
 EXPORT_SYMBOL_GPL(panic_timeout);
 
 ATOMIC_NOTIFIER_HEAD(panic_notifier_list);
@@ -63,7 +86,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 	va_list args;
 	long i, i_next = 0;
 	int state = 0;
-
+	
 	/*
 	 * It's possible to come here directly from a panic-assertion and
 	 * not have preempt disabled. Some functions called from here want
@@ -73,12 +96,60 @@ NORET_TYPE void panic(const char * fmt, ...)
 
 	console_verbose();
 	bust_spinlocks(1);
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
-	printk(KERN_EMERG "Kernel panic - not syncing: %s\n",buf);
+
+	if (panic_timeout > 0) {
+		pantech_errlog_display_get_log(diag_err_msg_buf, 0xc8);
+		strcpy(dispbuf," #####################################\n\a ");
+		strcat(dispbuf,buf);
+		strcat(dispbuf,"\n PC Crash at ");
+		strcat(dispbuf,diag_err_msg_buf);
+		strcat(dispbuf,"\b #####################################\n");
+		strcat(dispbuf,"\n");
+		strcat(dispbuf," Rebooting cause of Crash\n");
+		strcat(dispbuf," Press Power key for reboot\n");
+		strcat(dispbuf," Wait a minute for saving logs until rebooting \n");  
+		pantech_errlog_display_put_log(dispbuf, strlen(dispbuf));
+	   }
+#endif
+	
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	printk(KERN_EMERG "Kernel panic(CPU:%d) - not syncing: %s\n", smp_processor_id(), buf);
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	strcat(buf,"\nPC Crash at ");
+	strcat(buf,diag_err_msg_buf);  
+
+	apainc_kernel_stack_dump_end();
+#endif
+  
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 	dump_stack();
+#endif
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	panic_magic=(int*)__get_regs_crashed();
+	if(*(--panic_magic) == 0x0)
+	{		
+		unsigned int cpsr=0;
+		
+		asm volatile("\
+		stmia	%0, {r0-r12,sp,lr,pc}"	
+		:
+		: "r" (&backup_reg));
+
+		__asm__ volatile("mrs	%0, cpsr" : "=r" (cpsr));
+
+		backup_reg[16]=cpsr;
+		//__save_regs_and_mmu((struct pt_regs*)backup_reg);
+		pantech_machine_crash_shutdown((struct pt_regs*)backup_reg);		
+	}
 #endif
 
 	/*
@@ -95,7 +166,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 	 * unfortunately means it may not be hardened to work in a panic
 	 * situation.
 	 */
+#ifndef CONFIG_PANTECH_ERR_CRASH_LOGGING
 	smp_send_stop();
+#endif
 
 	atomic_notifier_call_chain(&panic_notifier_list, 0, buf);
 
@@ -105,10 +178,20 @@ NORET_TYPE void panic(const char * fmt, ...)
 		panic_blink = no_blink;
 
 	if (panic_timeout > 0) {
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING  
+		printk(KERN_EMERG "Rebooting cause of Linux Crash ");
+		if(arm_crash_reset){
+			arm_crash_reset();
+		} 
+#endif  
 		/*
 		 * Delay timeout seconds before rebooting the machine.
 		 * We can't use the "normal" timers since we just panicked.
 		 */
+#if 0//defined(CONFIG_PANTECH_ERR_CRASH_LOGGING) && !defined(FEATURE_SW_RESET_RELEASE_MODE)
+              pantech_errlog_check_powerkey();
+#endif
 		printk(KERN_EMERG "Rebooting in %d seconds..", panic_timeout);
 
 		for (i = 0; i < panic_timeout * 1000; i += PANIC_TIMER_STEP) {
@@ -342,6 +425,11 @@ late_initcall(init_oops_id);
 void print_oops_end_marker(void)
 {
 	init_oops_id();
+
+	if (mach_panic_string)
+		printk(KERN_WARNING "Board Information: %s\n",
+		       mach_panic_string);
+
 	printk(KERN_WARNING "---[ end trace %016llx ]---\n",
 		(unsigned long long)oops_id);
 }
