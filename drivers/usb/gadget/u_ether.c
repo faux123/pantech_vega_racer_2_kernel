@@ -55,6 +55,13 @@
 
 #define UETH__VERSION	"29-May-2008"
 
+#define FEATURE_PANTECH_RNDIS_MAC_ADDR_FIX
+
+#ifdef FEATURE_PANTECH_RNDIS_MAC_ADDR_FIX
+static u8 *temp_dev_addr;
+static u8 *temp_host_addr;
+#endif
+
 struct eth_dev {
 	/* lock is held while accessing port_usb
 	 * or updating its backlink port_usb->ioport
@@ -67,7 +74,7 @@ struct eth_dev {
 
 	spinlock_t		req_lock;	/* guard {rx,tx}_reqs */
 	struct list_head	tx_reqs, rx_reqs;
-	atomic_t		tx_qlen;
+	unsigned		tx_qlen;
 
 	struct sk_buff_head	rx_frames;
 
@@ -484,7 +491,6 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 	spin_unlock(&dev->req_lock);
 	dev_kfree_skb_any(skb);
 
-	atomic_dec(&dev->tx_qlen);
 	if (netif_carrier_ok(dev->net))
 		netif_wake_queue(dev->net);
 }
@@ -599,10 +605,18 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	req->length = length;
 
 	/* throttle highspeed IRQ rate back slightly */
-	if (gadget_is_dualspeed(dev->gadget))
-		req->no_interrupt = (dev->gadget->speed == USB_SPEED_HIGH)
-			? ((atomic_read(&dev->tx_qlen) % qmult) != 0)
-			: 0;
+	if (gadget_is_dualspeed(dev->gadget) &&
+			 (dev->gadget->speed == USB_SPEED_HIGH)) {
+		dev->tx_qlen++;
+		if (dev->tx_qlen == qmult) {
+			req->no_interrupt = 0;
+			dev->tx_qlen = 0;
+		} else {
+			req->no_interrupt = 1;
+		}
+	} else {
+		req->no_interrupt = 0;
+	}
 
 	retval = usb_ep_queue(in, req, GFP_ATOMIC);
 	switch (retval) {
@@ -611,7 +625,6 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		break;
 	case 0:
 		net->trans_start = jiffies;
-		atomic_inc(&dev->tx_qlen);
 	}
 
 	if (retval) {
@@ -637,7 +650,7 @@ static void eth_start(struct eth_dev *dev, gfp_t gfp_flags)
 	rx_fill(dev, gfp_flags);
 
 	/* and open the tx floodgates */
-	atomic_set(&dev->tx_qlen, 0);
+	dev->tx_qlen = 0;
 	netif_wake_queue(dev->net);
 }
 
@@ -765,6 +778,26 @@ static struct device_type gadget_type = {
  */
 int gether_setup(struct usb_gadget *g, u8 ethaddr[ETH_ALEN])
 {
+	return gether_setup_name(g, ethaddr, "usb");
+}
+
+/**
+ * gether_setup_name - initialize one ethernet-over-usb link
+ * @g: gadget to associated with these links
+ * @ethaddr: NULL, or a buffer in which the ethernet address of the
+ *	host side of the link is recorded
+ * @netname: name for network device (for example, "usb")
+ * Context: may sleep
+ *
+ * This sets up the single network link that may be exported by a
+ * gadget driver using this framework.  The link layer addresses are
+ * set up using module parameters.
+ *
+ * Returns negative errno, or zero on success
+ */
+int gether_setup_name(struct usb_gadget *g, u8 ethaddr[ETH_ALEN],
+		const char *netname)
+{
 	struct eth_dev		*dev;
 	struct net_device	*net;
 	int			status;
@@ -787,7 +820,7 @@ int gether_setup(struct usb_gadget *g, u8 ethaddr[ETH_ALEN])
 
 	/* network device setup */
 	dev->net = net;
-	strcpy(net->name, "usb%d");
+	snprintf(net->name, sizeof(net->name), "%s%%d", netname);
 
 	if (get_ether_addr(dev_addr, net->dev_addr))
 		dev_warn(&g->dev,
@@ -795,6 +828,24 @@ int gether_setup(struct usb_gadget *g, u8 ethaddr[ETH_ALEN])
 	if (get_ether_addr(host_addr, dev->host_mac))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "host");
+
+#ifdef FEATURE_PANTECH_RNDIS_MAC_ADDR_FIX
+	if (!temp_dev_addr){
+		temp_dev_addr = kzalloc(ETH_ALEN, GFP_KERNEL);
+		memcpy(temp_dev_addr, net->dev_addr, ETH_ALEN);
+	}
+
+	if (!temp_host_addr){
+		temp_host_addr = kzalloc(ETH_ALEN, GFP_KERNEL);
+		memcpy(temp_host_addr, dev->host_mac, ETH_ALEN);
+	}
+
+	if (temp_dev_addr)
+		memcpy(net->dev_addr, temp_dev_addr, ETH_ALEN);
+
+	if (temp_host_addr)
+		memcpy(dev->host_mac, ethaddr, ETH_ALEN);	
+#endif
 
 	if (ethaddr)
 		memcpy(ethaddr, dev->host_mac, ETH_ALEN);
@@ -943,7 +994,6 @@ void gether_disconnect(struct gether *link)
 	struct eth_dev		*dev = link->ioport;
 	struct usb_request	*req;
 
-	WARN_ON(!dev);
 	if (!dev)
 		return;
 

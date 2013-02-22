@@ -330,7 +330,7 @@ include $(srctree)/scripts/Kbuild.include
 
 AS		= $(CROSS_COMPILE)as
 LD		= $(CROSS_COMPILE)ld
-CC		= $(CROSS_COMPILE)gcc
+REAL_CC		= $(CROSS_COMPILE)gcc
 CPP		= $(CC) -E
 AR		= $(CROSS_COMPILE)ar
 NM		= $(CROSS_COMPILE)nm
@@ -344,6 +344,10 @@ DEPMOD		= /sbin/depmod
 KALLSYMS	= scripts/kallsyms
 PERL		= perl
 CHECK		= sparse
+
+# Use the wrapper for the compiler.  This wrapper scans for new
+# warnings and causes the build to stop upon encountering them.
+CC		= $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void $(CF)
@@ -369,6 +373,37 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
 		   -fno-delete-null-pointer-checks
+
+#// 20120105, albatros, imei 주소값의 공용으로 사용을 위해서
+ifeq ($(OEM_PRODUCT_MANUFACTURER),PANTECH)
+LINUXINCLUDE += -I$(srctree)/../pantech/frameworks/sky_rawdata
+endif
+
+$(info "======================LINUX INCLUDE===========================================================")
+$(info $(LINUXINCLUDE))
+$(info "==============================================================================================")
+
+######################################################################
+# PANTECH_ANDROID_FLAGS
+######################################################################
+# Android SKY cust Feature
+# Add START. by sungwook on 2010-05-07
+#----------------------------------------------------------------------
+PANTECH_ANDROID_FLAGS := -DFEATURE_AARM_RELEASE_MODE \
+						-DT_EF47S -I ./include/pantech \
+						-include ./include/pantech/CUST_PANTECH.h \
+						-DFIRM_VER=\"S0214124\" -DSYS_MODEL_NAME=\"EF47S\" \
+						-DPANTECH_MODEL_NAME=\"IM-A830S\" \
+						-DFS_USER_DATA_VER=37 \
+						-DPANTECH_STORAGE_INTERNAL_EMUL
+
+KBUILD_CFLAGS   += $(PANTECH_ANDROID_FLAGS) -D__KERNELBUILD__
+#----------------------------------------------------------------------
+$(info "KERNEL ======================================================================================")
+$(info $(KBUILD_CFLAGS))
+$(info "==============================================================================================")
+
+
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
 KBUILD_AFLAGS   := -D__ASSEMBLY__
