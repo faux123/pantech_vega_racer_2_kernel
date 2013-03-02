@@ -639,10 +639,11 @@ void gsdio_ctrl_wq(struct work_struct *w)
 			port->cbits_to_modem, ~(port->cbits_to_modem));
 }
 
-void gsdio_ctrl_notify_modem(struct gserial *gser, u8 portno, int ctrl_bits)
+void gsdio_ctrl_notify_modem(void *gptr, u8 portno, int ctrl_bits)
 {
 	struct gsdio_port *port;
 	int temp;
+	struct gserial *gser = gptr;
 
 	if (portno >= n_sdio_ports) {
 		pr_err("%s: invalid portno#%d\n", __func__, portno);
@@ -1107,7 +1108,6 @@ int gsdio_setup(struct usb_gadget *g, unsigned count)
 	struct usb_cdc_line_coding	coding;
 	int i;
 	int ret = 0;
-	struct sdio_port_info *port_info;
 
 	pr_debug("%s: gadget:(%p) count:%d\n", __func__, g, count);
 
@@ -1139,7 +1139,6 @@ int gsdio_setup(struct usb_gadget *g, unsigned count)
 					__func__);
 			goto free_sdio_ports;
 		}
-		port_info++;
 
 #ifdef DEBUG
 		/* REVISIT: create one file per port

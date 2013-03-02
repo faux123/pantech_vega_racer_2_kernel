@@ -26,6 +26,7 @@
 #include <mach/irqs.h>
 #include <mach/socinfo.h>
 #include <mach/rpm.h>
+#include <mach/msm_bus_board.h>
 #include <asm/hardware/cache-l2x0.h>
 #include <mach/msm_sps.h>
 #include <mach/dma.h>
@@ -34,6 +35,7 @@
 #include "spm.h"
 #include "pm.h"
 #include "rpm_resources.h"
+#include "msm_watchdog.h"
 
 /* Address of GSBI blocks */
 #define MSM_GSBI1_PHYS          0x16000000
@@ -55,6 +57,20 @@
 /* Address of SSBI CMD */
 #define MSM_PMIC1_SSBI_CMD_PHYS	0x00500000
 #define MSM_PMIC_SSBI_SIZE	SZ_4K
+
+static struct msm_watchdog_pdata msm_watchdog_pdata = {
+	.pet_time = 10000,
+	.bark_time = 11000,
+	.has_secure = true,
+};
+
+struct platform_device msm9615_device_watchdog = {
+	.name = "msm_watchdog",
+	.id = -1,
+	.dev = {
+		.platform_data = &msm_watchdog_pdata,
+	},
+};
 
 static struct resource msm_dmov_resource[] = {
 	{
@@ -82,6 +98,9 @@ struct platform_device msm9615_device_dmov = {
 		.platform_data = &msm_dmov_pdata,
 	},
 };
+
+#define MSM_USB_BAM_BASE     0x12502000
+#define MSM_USB_BAM_SIZE     0x3DFFF
 
 static struct resource resources_otg[] = {
 	{
@@ -119,6 +138,28 @@ static struct resource resources_hsusb[] = {
 	},
 };
 
+static struct resource resources_usb_bam[] = {
+	{
+		.name	= "usb_bam_addr",
+		.start	= MSM_USB_BAM_BASE,
+		.end	= MSM_USB_BAM_BASE + MSM_USB_BAM_SIZE,
+		.flags	= IORESOURCE_MEM,
+	},
+	{
+		.name	= "usb_bam_irq",
+		.start	= USB1_HS_BAM_IRQ,
+		.end	= USB1_HS_BAM_IRQ,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+struct platform_device msm_device_usb_bam = {
+	.name		= "usb_bam",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(resources_usb_bam),
+	.resource	= resources_usb_bam,
+};
+
 struct platform_device msm_device_gadget_peripheral = {
 	.name		= "msm_hsusb",
 	.id		= -1,
@@ -126,6 +167,31 @@ struct platform_device msm_device_gadget_peripheral = {
 	.resource	= resources_hsusb,
 	.dev		= {
 		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
+};
+
+static struct resource resources_hsusb_host[] = {
+	{
+		.start  = MSM9615_HSUSB_PHYS,
+		.end    = MSM9615_HSUSB_PHYS + MSM9615_HSUSB_PHYS - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+	{
+		.start  = USB1_HS_IRQ,
+		.end    = USB1_HS_IRQ,
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+static u64 dma_mask = DMA_BIT_MASK(32);
+struct platform_device msm_device_hsusb_host = {
+	.name           = "msm_hsusb_host",
+	.id             = -1,
+	.num_resources  = ARRAY_SIZE(resources_hsusb_host),
+	.resource       = resources_hsusb_host,
+	.dev            = {
+		.dma_mask               = &dma_mask,
+		.coherent_dma_mask      = 0xffffffff,
 	},
 };
 
@@ -212,6 +278,53 @@ struct platform_device msm9615_device_qup_spi_gsbi3 = {
 	.resource	= resources_qup_spi_gsbi3,
 };
 
+#define LPASS_SLIMBUS_PHYS	0x28080000
+#define LPASS_SLIMBUS_BAM_PHYS	0x28084000
+#define LPASS_SLIMBUS_SLEW	(MSM9615_TLMM_PHYS + 0x207C)
+/* Board info for the slimbus slave device */
+static struct resource slimbus_res[] = {
+	{
+		.start	= LPASS_SLIMBUS_PHYS,
+		.end	= LPASS_SLIMBUS_PHYS + 8191,
+		.flags	= IORESOURCE_MEM,
+		.name	= "slimbus_physical",
+	},
+	{
+		.start	= LPASS_SLIMBUS_BAM_PHYS,
+		.end	= LPASS_SLIMBUS_BAM_PHYS + 8191,
+		.flags	= IORESOURCE_MEM,
+		.name	= "slimbus_bam_physical",
+	},
+	{
+		.start	= LPASS_SLIMBUS_SLEW,
+		.end	= LPASS_SLIMBUS_SLEW + 4 - 1,
+		.flags	= IORESOURCE_MEM,
+		.name	= "slimbus_slew_reg",
+	},
+	{
+		.start	= SLIMBUS0_CORE_EE1_IRQ,
+		.end	= SLIMBUS0_CORE_EE1_IRQ,
+		.flags	= IORESOURCE_IRQ,
+		.name	= "slimbus_irq",
+	},
+	{
+		.start	= SLIMBUS0_BAM_EE1_IRQ,
+		.end	= SLIMBUS0_BAM_EE1_IRQ,
+		.flags	= IORESOURCE_IRQ,
+		.name	= "slimbus_bam_irq",
+	},
+};
+
+struct platform_device msm9615_slim_ctrl = {
+	.name	= "msm_slim_ctrl",
+	.id	= 1,
+	.num_resources	= ARRAY_SIZE(slimbus_res),
+	.resource	= slimbus_res,
+	.dev            = {
+		.coherent_dma_mask      = 0xffffffffULL,
+	},
+};
+
 static struct resource resources_ssbi_pmic1[] = {
 	{
 		.start  = MSM_PMIC1_SSBI_CMD_PHYS,
@@ -267,7 +380,7 @@ struct platform_device msm_device_sps = {
 };
 
 static struct tsens_platform_data msm_tsens_pdata = {
-	.slope			= 910,
+	.slope			= {910, 910, 910, 910, 910},
 	.tsens_factor		= 1000,
 	.hw_type		= MSM_9615,
 	.tsens_num_sensor	= 5,
@@ -314,6 +427,11 @@ struct platform_device msm_device_nand = {
 
 struct platform_device msm_device_smd = {
 	.name		= "msm_smd",
+	.id		= -1,
+};
+
+struct platform_device msm_device_bam_dmux = {
+	.name		= "BAM_RMNT",
 	.id		= -1,
 };
 
@@ -409,6 +527,7 @@ static struct msm_ce_hw_support qcrypto_ce_hw_suppport = {
 	.shared_ce_resource = QCE_SHARE_CE_RESOURCE,
 	.hw_key_support = QCE_HW_KEY_SUPPORT,
 	.sha_hmac = QCE_SHA_HMAC_SUPPORT,
+	.bus_scale_table = NULL,
 };
 
 struct platform_device msm9615_qcrypto_device = {
@@ -431,6 +550,7 @@ static struct msm_ce_hw_support qcedev_ce_hw_suppport = {
 	.shared_ce_resource = QCE_SHARE_CE_RESOURCE,
 	.hw_key_support = QCE_HW_KEY_SUPPORT,
 	.sha_hmac = QCE_SHA_HMAC_SUPPORT,
+	.bus_scale_table = NULL,
 };
 
 struct platform_device msm9615_qcedev_device = {
@@ -647,53 +767,47 @@ struct platform_device msm_rpm_device = {
 };
 
 static uint16_t msm_mpm_irqs_m2a[MSM_MPM_NR_MPM_IRQS] = {
-	[1] = MSM_GPIO_TO_INT(46),
-	[2] = MSM_GPIO_TO_INT(150),
-	[4] = MSM_GPIO_TO_INT(103),
-	[5] = MSM_GPIO_TO_INT(104),
-	[6] = MSM_GPIO_TO_INT(105),
-	[7] = MSM_GPIO_TO_INT(106),
-	[8] = MSM_GPIO_TO_INT(107),
-	[9] = MSM_GPIO_TO_INT(7),
-	[10] = MSM_GPIO_TO_INT(11),
-	[11] = MSM_GPIO_TO_INT(15),
-	[12] = MSM_GPIO_TO_INT(19),
-	[13] = MSM_GPIO_TO_INT(23),
-	[14] = MSM_GPIO_TO_INT(27),
-	[15] = MSM_GPIO_TO_INT(31),
-	[16] = MSM_GPIO_TO_INT(35),
-	[19] = MSM_GPIO_TO_INT(90),
-	[20] = MSM_GPIO_TO_INT(92),
-	[23] = MSM_GPIO_TO_INT(85),
-	[24] = MSM_GPIO_TO_INT(83),
-	[25] = USB1_HS_IRQ,
-	/*[27] = HDMI_IRQ,*/
-	[29] = MSM_GPIO_TO_INT(10),
-	[30] = MSM_GPIO_TO_INT(102),
-	[31] = MSM_GPIO_TO_INT(81),
-	[32] = MSM_GPIO_TO_INT(78),
-	[33] = MSM_GPIO_TO_INT(94),
-	[34] = MSM_GPIO_TO_INT(72),
-	[35] = MSM_GPIO_TO_INT(39),
-	[36] = MSM_GPIO_TO_INT(43),
-	[37] = MSM_GPIO_TO_INT(61),
-	[38] = MSM_GPIO_TO_INT(50),
-	[39] = MSM_GPIO_TO_INT(42),
-	[41] = MSM_GPIO_TO_INT(62),
-	[42] = MSM_GPIO_TO_INT(76),
-	[43] = MSM_GPIO_TO_INT(75),
-	[44] = MSM_GPIO_TO_INT(70),
-	[45] = MSM_GPIO_TO_INT(69),
-	[46] = MSM_GPIO_TO_INT(67),
-	[47] = MSM_GPIO_TO_INT(65),
-	[48] = MSM_GPIO_TO_INT(58),
-	[49] = MSM_GPIO_TO_INT(54),
-	[50] = MSM_GPIO_TO_INT(52),
-	[51] = MSM_GPIO_TO_INT(49),
-	[52] = MSM_GPIO_TO_INT(40),
-	[53] = MSM_GPIO_TO_INT(37),
-	[54] = MSM_GPIO_TO_INT(24),
-	[55] = MSM_GPIO_TO_INT(14),
+	[4] = MSM_GPIO_TO_INT(30),
+	[5] = MSM_GPIO_TO_INT(59),
+	[6] = MSM_GPIO_TO_INT(81),
+	[7] = MSM_GPIO_TO_INT(87),
+	[8] = MSM_GPIO_TO_INT(86),
+	[9] = MSM_GPIO_TO_INT(2),
+	[10] = MSM_GPIO_TO_INT(6),
+	[11] = MSM_GPIO_TO_INT(10),
+	[12] = MSM_GPIO_TO_INT(14),
+	[13] = MSM_GPIO_TO_INT(18),
+	[14] = MSM_GPIO_TO_INT(7),
+	[15] = MSM_GPIO_TO_INT(11),
+	[16] = MSM_GPIO_TO_INT(15),
+	[19] = MSM_GPIO_TO_INT(26),
+	[20] = MSM_GPIO_TO_INT(28),
+	[23] = MSM_GPIO_TO_INT(19),
+	[24] = MSM_GPIO_TO_INT(23),
+	[26] = MSM_GPIO_TO_INT(3),
+	[27] = MSM_GPIO_TO_INT(68),
+	[29] = MSM_GPIO_TO_INT(78),
+	[31] = MSM_GPIO_TO_INT(0),
+	[32] = MSM_GPIO_TO_INT(4),
+	[33] = MSM_GPIO_TO_INT(22),
+	[34] = MSM_GPIO_TO_INT(17),
+	[37] = MSM_GPIO_TO_INT(20),
+	[39] = MSM_GPIO_TO_INT(84),
+	[40] = USB1_HS_IRQ,
+	[42] = MSM_GPIO_TO_INT(24),
+	[43] = MSM_GPIO_TO_INT(79),
+	[44] = MSM_GPIO_TO_INT(80),
+	[45] = MSM_GPIO_TO_INT(82),
+	[46] = MSM_GPIO_TO_INT(85),
+	[47] = MSM_GPIO_TO_INT(45),
+	[48] = MSM_GPIO_TO_INT(50),
+	[49] = MSM_GPIO_TO_INT(51),
+	[50] = MSM_GPIO_TO_INT(69),
+	[51] = MSM_GPIO_TO_INT(77),
+	[52] = MSM_GPIO_TO_INT(1),
+	[53] = MSM_GPIO_TO_INT(5),
+	[54] = MSM_GPIO_TO_INT(40),
+	[55] = MSM_GPIO_TO_INT(27),
 };
 
 static uint16_t msm_mpm_bypassed_apps_irqs[] = {
@@ -702,10 +816,13 @@ static uint16_t msm_mpm_bypassed_apps_irqs[] = {
 	RPM_APCC_CPU0_GP_MEDIUM_IRQ,
 	RPM_APCC_CPU0_GP_LOW_IRQ,
 	RPM_APCC_CPU0_WAKE_UP_IRQ,
+	MSS_TO_APPS_IRQ_0,
+	MSS_TO_APPS_IRQ_1,
 	LPASS_SCSS_GP_LOW_IRQ,
 	LPASS_SCSS_GP_MEDIUM_IRQ,
 	LPASS_SCSS_GP_HIGH_IRQ,
 	SPS_MTI_31,
+	A2_BAM_IRQ,
 };
 
 struct msm_mpm_device_data msm_mpm_dev_data = {
@@ -721,20 +838,19 @@ struct msm_mpm_device_data msm_mpm_dev_data = {
 };
 
 static uint8_t spm_wfi_cmd_sequence[] __initdata = {
-	0x00, 0x03, 0x0B, 0x00,
-	0x0f,
+	0x00, 0x03, 0x00, 0x0f,
 };
 
 static uint8_t spm_power_collapse_without_rpm[] __initdata = {
-	0x30, 0x20, 0x10, 0x00,
-	0x50, 0x03, 0x50, 0x00,
-	0x10, 0x20, 0x30, 0x0f,
+	0x34, 0x24, 0x14, 0x04,
+	0x54, 0x03, 0x54, 0x04,
+	0x14, 0x24, 0x3e, 0x0f,
 };
 
 static uint8_t spm_power_collapse_with_rpm[] __initdata = {
-	0x30, 0x20, 0x10, 0x00,
-	0x50, 0x07, 0x50, 0x00,
-	0x10, 0x20, 0x30, 0x0f,
+	0x34, 0x24, 0x14, 0x04,
+	0x54, 0x07, 0x54, 0x04,
+	0x14, 0x24, 0x3e, 0x0f,
 };
 
 static struct msm_spm_seq_entry msm_spm_seq_list[] __initdata = {
@@ -759,7 +875,7 @@ static struct msm_spm_platform_data msm_spm_data[] __initdata = {
 	[0] = {
 		.reg_base_addr = MSM_SAW0_BASE,
 		.reg_init_values[MSM_SPM_REG_SAW2_SPM_CTL] = 0x01,
-		.reg_init_values[MSM_SPM_REG_SAW2_CFG] = 0x1F,
+		.reg_init_values[MSM_SPM_REG_SAW2_CFG] = 0x1001,
 		.num_modes = ARRAY_SIZE(msm_spm_seq_list),
 		.modes = msm_spm_seq_list,
 	},
@@ -770,20 +886,32 @@ static struct msm_rpmrs_level msm_rpmrs_levels[] __initdata = {
 		MSM_PM_SLEEP_MODE_WAIT_FOR_INTERRUPT,
 		MSM_RPMRS_LIMITS(ON, ACTIVE, MAX, ACTIVE),
 		true,
-		1, 8000, 100000, 1,
+		100, 8000, 100000, 1,
 	},
 
 	{
 		MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE,
 		MSM_RPMRS_LIMITS(ON, ACTIVE, MAX, ACTIVE),
 		true,
-		1500, 5000, 60100000, 3000,
+		2000, 5000, 60100000, 3000,
 	},
 	{
 		MSM_PM_SLEEP_MODE_POWER_COLLAPSE,
 		MSM_RPMRS_LIMITS(ON, ACTIVE, MAX, ACTIVE),
 		false,
-		2800, 5000, 60350000, 3500,
+		6300, 5000, 60350000, 3500,
+	},
+	{
+		MSM_PM_SLEEP_MODE_POWER_COLLAPSE,
+		MSM_RPMRS_LIMITS(OFF, HSFS_OPEN, MAX, ACTIVE),
+		false,
+		13300, 2000, 71850000, 6800,
+	},
+	{
+		MSM_PM_SLEEP_MODE_POWER_COLLAPSE,
+		MSM_RPMRS_LIMITS(OFF, HSFS_OPEN, RET_HIGH, RET_LOW),
+		false,
+		28300, 0, 76350000, 9800,
 	},
 };
 
@@ -807,8 +935,6 @@ void __init msm9615_map_io(void)
 
 void __init msm9615_init_irq(void)
 {
-	unsigned int i;
-
 	msm_mpm_irq_extn_init();
 	gic_init(0, GIC_PPI_START, MSM_QGIC_DIST_BASE,
 						(void *)MSM_QGIC_CPU_BASE);
@@ -818,14 +944,14 @@ void __init msm9615_init_irq(void)
 
 	writel_relaxed(0x0000FFFF, MSM_QGIC_DIST_BASE + GIC_DIST_ENABLE_SET);
 	mb();
-
-	/*
-	 * FIXME: Not installing AVS_SVICINT and AVS_SVICINTSWDONE yet
-	 * as they are configured as level, which does not play nice with
-	 * handle_percpu_irq.
-	 */
-	for (i = GIC_PPI_START; i < GIC_SPI_START; i++) {
-		if (i != AVS_SVICINT && i != AVS_SVICINTSWDONE)
-			irq_set_handler(i, handle_percpu_irq);
-	}
 }
+
+struct platform_device msm_bus_9615_sys_fabric = {
+	.name  = "msm_bus_fabric",
+	.id    =  MSM_BUS_FAB_SYSTEM,
+};
+
+struct platform_device msm_bus_def_fab = {
+	.name  = "msm_bus_fabric",
+	.id    =  MSM_BUS_FAB_DEFAULT,
+};

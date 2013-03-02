@@ -38,6 +38,26 @@ struct pmic8xxx_pwrkey {
 	const struct pm8xxx_pwrkey_platform_data *pdata;
 };
 
+#if defined(CONFIG_PANTECH_PMIC_PWRKEY)
+struct pm8921_oem_pwrkey_chip {
+  struct device		*dev;
+  int oem_pwrkey_release_irq;
+	int oem_pwrkey_press_irq;
+};
+
+static struct pm8921_oem_pwrkey_chip *oem_chip;
+
+int get_pwrkey_rt_status(void)
+{
+  if (!oem_chip)
+		return 0;
+	
+	return pm8xxx_read_irq_stat(oem_chip->dev->parent, oem_chip->oem_pwrkey_press_irq);
+}
+
+EXPORT_SYMBOL_GPL(get_pwrkey_rt_status);
+#endif
+
 static irqreturn_t pwrkey_press_irq(int irq, void *_pwrkey)
 {
 	struct pmic8xxx_pwrkey *pwrkey = _pwrkey;
@@ -95,12 +115,24 @@ static int __devinit pmic8xxx_pwrkey_probe(struct platform_device *pdev)
 	const struct pm8xxx_pwrkey_platform_data *pdata =
 					dev_get_platdata(&pdev->dev);
 
+	#if defined(CONFIG_PANTECH_PMIC_PWRKEY)
+	struct pm8921_oem_pwrkey_chip *chip;
+	chip = kzalloc(sizeof(struct pm8921_oem_pwrkey_chip),
+					GFP_KERNEL);
+
+	chip->dev = &pdev->dev;
+	chip->oem_pwrkey_press_irq   = key_press_irq;
+	chip->oem_pwrkey_release_irq = key_release_irq;
+	#endif
+
 	if (!pdata) {
 		dev_err(&pdev->dev, "power key platform data not supplied\n");
 		return -EINVAL;
 	}
 
-	if (pdata->kpd_trigger_delay_us > 62500) {
+	/* Valid range of pwr key trigger delay is 1/64 sec to 2 seconds. */
+	if (pdata->kpd_trigger_delay_us > USEC_PER_SEC * 2 ||
+		pdata->kpd_trigger_delay_us < USEC_PER_SEC / 64) {
 		dev_err(&pdev->dev, "invalid power key trigger delay\n");
 		return -EINVAL;
 	}
@@ -124,8 +156,8 @@ static int __devinit pmic8xxx_pwrkey_probe(struct platform_device *pdev)
 	pwr->phys = "pmic8xxx_pwrkey/input0";
 	pwr->dev.parent = &pdev->dev;
 
-	delay = (pdata->kpd_trigger_delay_us << 10) / USEC_PER_SEC;
-	delay = 1 + ilog2(delay);
+	delay = (pdata->kpd_trigger_delay_us << 6) / USEC_PER_SEC;
+	delay = ilog2(delay);
 
 	err = pm8xxx_readb(pdev->dev.parent, PON_CNTL_1, &pon_cntl);
 	if (err < 0) {
@@ -156,6 +188,10 @@ static int __devinit pmic8xxx_pwrkey_probe(struct platform_device *pdev)
 	pwrkey->pwr = pwr;
 
 	platform_set_drvdata(pdev, pwrkey);
+
+	#if defined(CONFIG_PANTECH_PMIC_PWRKEY)
+	oem_chip = chip;
+	#endif
 
 	err = request_any_context_irq(key_press_irq, pwrkey_press_irq,
 		IRQF_TRIGGER_RISING, "pmic8xxx_pwrkey_press", pwrkey);

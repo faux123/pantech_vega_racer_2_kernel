@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,6 +16,10 @@
 
 #define MAX_VOC_PKT_SIZE 642
 #define SESSION_NAME_LEN 20
+
+#define VOC_REC_UPLINK		0x00
+#define VOC_REC_DOWNLINK	0x01
+#define VOC_REC_BOTH		0x02
 
 struct voice_header {
 	uint32_t id;
@@ -41,6 +45,11 @@ struct device_data {
 struct voice_dev_route_state {
 	u16 rx_route_flag;
 	u16 tx_route_flag;
+};
+
+struct voice_rec_route_state {
+	u16 ul_flag;
+	u16 dl_flag;
 };
 
 enum {
@@ -314,9 +323,40 @@ struct mvm_set_widevoice_enable_cmd {
 #define VSS_ISTREAM_CMD_SET_ENC_DTX_MODE		0x0001101D
 /* Set encoder DTX mode. */
 
+#define MODULE_ID_VOICE_MODULE_FENS			0x00010EEB
 #define MODULE_ID_VOICE_MODULE_ST			0x00010EE3
 #define VOICE_PARAM_MOD_ENABLE				0x00010E00
 #define MOD_ENABLE_PARAM_LEN				4
+
+#define VSS_ISTREAM_CMD_START_PLAYBACK                  0x00011238
+/* Start in-call music delivery on the Tx voice path. */
+
+#define VSS_ISTREAM_CMD_STOP_PLAYBACK                   0x00011239
+/* Stop the in-call music delivery on the Tx voice path. */
+
+#define VSS_ISTREAM_CMD_START_RECORD                    0x00011236
+/* Start in-call conversation recording. */
+#define VSS_ISTREAM_CMD_STOP_RECORD                     0x00011237
+/* Stop in-call conversation recording. */
+
+#define VSS_TAP_POINT_NONE                              0x00010F78
+/* Indicates no tapping for specified path. */
+
+#define VSS_TAP_POINT_STREAM_END                        0x00010F79
+/* Indicates that specified path should be tapped at the end of the stream. */
+
+struct vss_istream_cmd_start_record_t {
+	uint32_t rx_tap_point;
+	/* Tap point to use on the Rx path. Supported values are:
+	 * VSS_TAP_POINT_NONE : Do not record Rx path.
+	 * VSS_TAP_POINT_STREAM_END : Rx tap point is at the end of the stream.
+	 */
+	uint32_t tx_tap_point;
+	/* Tap point to use on the Tx path. Supported values are:
+	 * VSS_TAP_POINT_NONE : Do not record tx path.
+	 * VSS_TAP_POINT_STREAM_END : Tx tap point is at the end of the stream.
+	 */
+} __packed;
 
 struct vss_istream_cmd_create_passive_control_session_t {
 	char name[SESSION_NAME_LEN];
@@ -462,7 +502,7 @@ struct vss_istream_cmd_register_calibration_data_t {
 	/* Size of the calibration data in bytes. */
 };
 
-struct vss_icommon_cmd_set_ui_property_st_enable_t {
+struct vss_icommon_cmd_set_ui_property_enable_t {
 	uint32_t module_id;
 	/* Unique ID of the module. */
 	uint32_t param_id;
@@ -534,9 +574,13 @@ struct cvs_deregister_cal_data_cmd {
 	struct apr_hdr hdr;
 } __packed;
 
-struct cvs_set_slowtalk_enable_cmd {
+struct cvs_set_pp_enable_cmd {
 	struct apr_hdr hdr;
-	struct vss_icommon_cmd_set_ui_property_st_enable_t vss_set_st;
+	struct vss_icommon_cmd_set_ui_property_enable_t vss_set_pp;
+} __packed;
+struct cvs_start_record_cmd {
+	struct apr_hdr hdr;
+	struct vss_istream_cmd_start_record_t rec_mode;
 } __packed;
 
 /* TO CVP commands */
@@ -593,9 +637,25 @@ struct cvs_set_slowtalk_enable_cmd {
 #define VSS_MEDIA_ID_G729		0x00010FD0
 /* G.729AB (contains two 10ms vocoder frames. */
 
+#define VSS_IVOCPROC_CMD_SET_MUTE			0x000110EF
+
 #define VOICE_CMD_SET_PARAM				0x00011006
 #define VOICE_CMD_GET_PARAM				0x00011007
 #define VOICE_EVT_GET_PARAM_ACK				0x00011008
+
+#if defined(CONFIG_PANTECH_SND) && defined(CONFIG_MACH_MSM8960_STARQ)  // NR on-off apr: jykim120217@LS1
+#define TX_VOICE_ELECTOVOX_MODULE		(0x10003000)
+#define TX_VOICE_ELECTOVOX_PARAM		(0x10003001)
+#define TX_VOICE_ELECTOVOX_NR_ON		(0x10003002)
+#define TX_VOICE_ELECTOVOX_NR_OFF		(0x10003003)
+#define TX_VOICE_ELECTOVOX_NR_HANDSET_ON		(0x10003004)
+#define TX_VOICE_ELECTOVOX_NR_HEADSET_ON		(0x10003005)
+#define TX_VOICE_ELECTOVOX_NR_SPEAKER_ON		(0x10003006)
+
+// This is not for ElectoVox Off but for "NR mode" off.
+// To Turn off ElectoVox, use TX_VOICE_ELECTOVOX_NR_OFF.
+#define TX_VOICE_ELECTOVOX_NR_MODE_OFF	    	(0x10003007)
+#endif  // NR on-off apr: jykim120217@LS1
 
 struct vss_ivocproc_cmd_create_full_control_session_t {
 	uint16_t direction;
@@ -685,6 +745,22 @@ struct vss_ivocproc_cmd_register_volume_cal_table_t {
 	/* Size of the volume calibration table in bytes. */
 } __packed;
 
+struct vss_ivocproc_cmd_set_mute_t {
+	uint16_t direction;
+	/*
+	* 0 : TX only.
+	* 1 : RX only.
+	* 2 : TX and Rx.
+	*/
+	uint16_t mute_flag;
+	/*
+	* Mute, un-mute.
+	*
+	* 0 : Disable.
+	* 1 : Enable.
+	*/
+} __packed;
+
 struct cvp_create_full_ctl_session_cmd {
 	struct apr_hdr hdr;
 	struct vss_ivocproc_cmd_create_full_control_session_t cvp_session;
@@ -726,6 +802,11 @@ struct cvp_deregister_vol_cal_table_cmd {
 	struct apr_hdr hdr;
 } __packed;
 
+struct cvp_set_mute_cmd {
+	struct apr_hdr hdr;
+	struct vss_ivocproc_cmd_set_mute_t cvp_set_mute;
+} __packed;
+
 /* CB for up-link packets. */
 typedef void (*ul_cb_fn)(uint8_t *voc_pkt,
 			 uint32_t pkt_len,
@@ -741,19 +822,23 @@ struct mvs_driver_info {
 	uint32_t media_type;
 	uint32_t rate;
 	uint32_t network_type;
+	uint32_t dtx_mode;
 	ul_cb_fn ul_cb;
 	dl_cb_fn dl_cb;
 	void *private_data;
 };
 
 struct incall_rec_info {
-	uint32_t pending;
+	uint32_t rec_enable;
 	uint32_t rec_mode;
+	uint32_t recording;
 };
 
 struct incall_music_info {
-	uint32_t pending;
+	uint32_t play_enable;
 	uint32_t playing;
+	int count;
+	int force;
 };
 
 struct voice_data {
@@ -786,10 +871,23 @@ struct voice_data {
 	uint8_t wv_enable;
 	/* slowtalk enable value */
 	uint32_t st_enable;
+	/* FENC enable value */
+	uint32_t fens_enable;
 
 	struct voice_dev_route_state voc_route_state;
 
 	u16 session_id;
+
+	struct incall_rec_info rec_info;
+
+	struct incall_music_info music_info;
+
+	struct voice_rec_route_state rec_route_state;
+};
+
+struct cal_mem {
+	uint32_t phy;
+	void *buf;
 };
 
 #define MAX_VOC_SESSIONS 2
@@ -808,6 +906,9 @@ struct common_data {
 	/* APR to CVP in the Q6 */
 	void *apr_q6_cvp;
 
+	struct cal_mem cvp_cal;
+	struct cal_mem cvs_cal;
+
 	struct mutex common_lock;
 
 	struct mvs_driver_info mvs_info;
@@ -821,7 +922,8 @@ void voc_register_mvs_cb(ul_cb_fn ul_cb,
 
 void voc_config_vocoder(uint32_t media_type,
 			uint32_t rate,
-			uint32_t network_type);
+			uint32_t network_type,
+			uint32_t dtx_mode);
 
 enum {
 	DEV_RX = 0,
@@ -833,9 +935,35 @@ enum {
 	TX_PATH,
 };
 
+#if defined(CONFIG_PANTECH_SND) && defined(CONFIG_MACH_MSM8960_STARQ)  // NR on-off apr: jykim120217@LS1
+struct set_param_cmd_payload_t {
+	uint32_t payload_address; // NULL for inband param
+	uint32_t payload_size; // bytes of all data below this position 
+	uint32_t module_id;
+	uint32_t param_id;
+    	uint16_t param_size; // = 0x4; //10 bytes,
+	uint16_t reserved; // reserved 
+} __packed;
+
+struct oempp_arg_t {
+	uint16_t enable;
+	uint16_t reserved; // reserved for next buffer align or 32bit parameter
+	//int16_t buffer[11]; // start aligned at 4 bytes(64bit)
+	//uint16_t reserved; // total end aligned at 4bytes
+} __packed;
+
+struct oem_pp_set_param_send_cmd {
+	struct apr_hdr hdr;
+        struct set_param_cmd_payload_t setparam_payload; 
+	struct oempp_arg_t oempp_args;
+} __packed;
+
+int voice_send_set_oempp_enable_cmd(int cmd);
+#endif  // NR on-off apr: jykim120217@LS1
+
 /* called  by alsa driver */
-int voc_set_slowtalk_enable(uint16_t session_id, uint32_t st_enable);
-uint32_t voc_get_slowtalk_enable(uint16_t session_id);
+int voc_set_pp_enable(uint16_t session_id, uint32_t module_id, uint32_t enable);
+int voc_get_pp_enable(uint16_t session_id, uint32_t module_id);
 int voc_set_widevoice_enable(uint16_t session_id, uint32_t wv_enable);
 uint32_t voc_get_widevoice_enable(uint16_t session_id);
 uint8_t voc_get_tty_mode(uint16_t session_id);
@@ -847,6 +975,8 @@ int voc_set_rxtx_port(uint16_t session_id,
 		      uint32_t dev_type);
 int voc_set_rx_vol_index(uint16_t session_id, uint32_t dir, uint32_t voc_idx);
 int voc_set_tx_mute(uint16_t session_id, uint32_t dir, uint32_t mute);
+int voc_set_rx_device_mute(uint16_t session_id, uint32_t mute);
+int voc_get_rx_device_mute(uint16_t session_id);
 int voc_disable_cvp(uint16_t session_id);
 int voc_enable_cvp(uint16_t session_id);
 int voc_set_route_flag(uint16_t session_id, uint8_t path_dir, uint8_t set);
@@ -856,4 +986,6 @@ uint8_t voc_get_route_flag(uint16_t session_id, uint8_t path_dir);
 #define VOIP_SESSION_NAME "VoIP session"
 uint16_t voc_get_session_id(char *name);
 
+int voc_start_playback(uint32_t set);
+int voc_start_record(uint32_t port_id, uint32_t set);
 #endif

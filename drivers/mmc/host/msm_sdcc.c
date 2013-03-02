@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2007 Google Inc,
  *  Copyright (C) 2003 Deep Blue Solutions, Ltd, All Rights Reserved.
- *  Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
+ *  Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -19,6 +19,7 @@
 #include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/of.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -42,7 +43,7 @@
 #include <linux/gpio.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
-#include <linux/mmc/mmc.h>
+#include <linux/pm_qos_params.h>
 
 #include <asm/cacheflush.h>
 #include <asm/div64.h>
@@ -68,8 +69,6 @@
 #define SPS_SDCC_CONSUMER_PIPE_INDEX	2
 #define SPS_CONS_PERIPHERAL		0
 #define SPS_PROD_PERIPHERAL		1
-/* 16 KB */
-#define SPS_MAX_DESC_SIZE		(16 * 1024)
 
 #if defined(CONFIG_DEBUG_FS)
 static void msmsdcc_dbg_createhost(struct msmsdcc_host *);
@@ -78,6 +77,7 @@ static struct dentry *debugfs_file;
 static int  msmsdcc_dbg_init(void);
 #endif
 
+static u64 dma_mask = DMA_BIT_MASK(32);
 static unsigned int msmsdcc_pwrsave = 1;
 
 static struct mmc_command dummy52cmd;
@@ -102,6 +102,10 @@ static const u32 cmd19_tuning_block[16] = {
 	0xF0FFF0FF, 0x3CCCFC0F, 0xCFCC33CC, 0xEEFFEFFF,
 	0xFDFFFDFF, 0xFFBFFFDF, 0xFFF7FFBB, 0xDE7B7FF7
 };
+
+#if CONFIG_PANTECH_MMC  // 20120414_LS1 temp
+static unsigned int msmsdcc_slot_status(struct msmsdcc_host *host);
+#endif
 
 #if IRQ_DEBUG == 1
 static char *irq_status_bits[] = { "cmdcrcfail", "datcrcfail", "cmdtimeout",
@@ -132,6 +136,42 @@ msmsdcc_print_status(struct msmsdcc_host *host, char *hdr, uint32_t status)
 static void
 msmsdcc_start_command(struct msmsdcc_host *host, struct mmc_command *cmd,
 		      u32 c);
+static inline void msmsdcc_delay(struct msmsdcc_host *host);
+static void msmsdcc_dump_sdcc_state(struct msmsdcc_host *host);
+static int msmsdcc_vreg_reset(struct msmsdcc_host *host);
+static void msmsdcc_sg_start(struct msmsdcc_host *host);
+
+static inline unsigned short msmsdcc_get_nr_sg(struct msmsdcc_host *host)
+{
+	unsigned short ret = NR_SG;
+
+	if (host->is_sps_mode) {
+		ret = SPS_MAX_DESCS;
+	} else { /* DMA or PIO mode */
+		if (NR_SG > MAX_NR_SG_DMA_PIO)
+			ret = MAX_NR_SG_DMA_PIO;
+	}
+
+	return ret;
+}
+
+/* Prevent idle power collapse(pc) while operating in peripheral mode */
+static void msmsdcc_pm_qos_update_latency(struct msmsdcc_host *host, int vote)
+{
+	u32 swfi_latency = 0;
+
+	if (!host->plat->swfi_latency)
+		return;
+
+	swfi_latency = host->plat->swfi_latency + 1;
+
+	if (vote)
+		pm_qos_update_request(&host->pm_qos_req_dma,
+					swfi_latency);
+	else
+		pm_qos_update_request(&host->pm_qos_req_dma,
+					PM_QOS_DEFAULT_VALUE);
+}
 
 #ifdef CONFIG_MMC_MSM_SPS_SUPPORT
 static int msmsdcc_sps_reset_ep(struct msmsdcc_host *host,
@@ -207,77 +247,83 @@ static void msmsdcc_sps_pipes_reset_and_restore(struct msmsdcc_host *host)
  * @host - Pointer to driver's host structure
  *
  */
-static void msmsdcc_soft_reset_and_restore(struct msmsdcc_host *host)
+static void msmsdcc_soft_reset(struct msmsdcc_host *host)
 {
-	if (host->is_sps_mode) {
-		/* Reset DML first */
-		msmsdcc_dml_reset(host);
-		/*
-		 * delay the SPS pipe reset in thread context as
-		 * sps_connect/sps_disconnect APIs can be called
-		 * only from non-atomic context.
-		 */
-		host->sps.pipe_reset_pending = true;
-	}
 	/*
 	 * Reset SDCC controller's DPSM (data path state machine
 	 * and CPSM (command path state machine).
 	 */
-	mb();
 	writel_relaxed(0, host->base + MMCICOMMAND);
+	msmsdcc_delay(host);
 	writel_relaxed(0, host->base + MMCIDATACTRL);
-	mb();
+	msmsdcc_delay(host);
+}
 
-	pr_debug("%s: Applied soft reset to Controller\n",
-			mmc_hostname(host->mmc));
+static void msmsdcc_hard_reset(struct msmsdcc_host *host)
+{
+	int ret;
 
-	if (host->is_sps_mode)
-		msmsdcc_dml_init(host);
+	/* Reset the controller */
+	ret = clk_reset(host->clk, CLK_RESET_ASSERT);
+	if (ret)
+		pr_err("%s: Clock assert failed at %u Hz"
+			" with err %d\n", mmc_hostname(host->mmc),
+				host->clk_rate, ret);
+
+	ret = clk_reset(host->clk, CLK_RESET_DEASSERT);
+	if (ret)
+		pr_err("%s: Clock deassert failed at %u Hz"
+			" with err %d\n", mmc_hostname(host->mmc),
+			host->clk_rate, ret);
+
+	/* Give some delay for clock reset to propogate to controller */
+	msmsdcc_delay(host);
 }
 
 static void msmsdcc_reset_and_restore(struct msmsdcc_host *host)
 {
-	if (host->plat->sdcc_v4_sup) {
-		msmsdcc_soft_reset_and_restore(host);
+	if (host->sdcc_version) {
+		if (host->is_sps_mode) {
+			/* Reset DML first */
+			msmsdcc_dml_reset(host);
+			/*
+			 * delay the SPS pipe reset in thread context as
+			 * sps_connect/sps_disconnect APIs can be called
+			 * only from non-atomic context.
+			 */
+			host->sps.pipe_reset_pending = true;
+		}
+		mb();
+		msmsdcc_soft_reset(host);
+
+		pr_debug("%s: Applied soft reset to Controller\n",
+				mmc_hostname(host->mmc));
+
+		if (host->is_sps_mode)
+			msmsdcc_dml_init(host);
 	} else {
 		/* Give Clock reset (hard reset) to controller */
 		u32	mci_clk = 0;
 		u32	mci_mask0 = 0;
-		int ret;
 
 		/* Save the controller state */
 		mci_clk = readl_relaxed(host->base + MMCICLOCK);
 		mci_mask0 = readl_relaxed(host->base + MMCIMASK0);
-
 		mb();
-		/* Reset the controller */
-		ret = clk_reset(host->clk, CLK_RESET_ASSERT);
-		if (ret)
-			pr_err("%s: Clock assert failed at %u Hz"
-				" with err %d\n", mmc_hostname(host->mmc),
-					host->clk_rate, ret);
 
-		ret = clk_reset(host->clk, CLK_RESET_DEASSERT);
-		if (ret)
-			pr_err("%s: Clock deassert failed at %u Hz"
-				" with err %d\n", mmc_hostname(host->mmc),
-					host->clk_rate, ret);
-
+		msmsdcc_hard_reset(host);
 		pr_debug("%s: Controller has been reinitialized\n",
 				mmc_hostname(host->mmc));
 
-		mb();
 		/* Restore the contoller state */
 		writel_relaxed(host->pwr, host->base + MMCIPOWER);
+		msmsdcc_delay(host);
 		writel_relaxed(mci_clk, host->base + MMCICLOCK);
+		msmsdcc_delay(host);
 		writel_relaxed(mci_mask0, host->base + MMCIMASK0);
-		ret = clk_set_rate(host->clk, host->clk_rate);
-		if (ret)
-			pr_err("%s: Failed to set clk rate %u Hz. err %d\n",
-					mmc_hostname(host->mmc),
-					host->clk_rate, ret);
-		mb();
+		mb(); /* no delay required after writing to MASK0 register */
 	}
+
 	if (host->dummy_52_needed)
 		host->dummy_52_needed = 0;
 }
@@ -289,15 +335,15 @@ msmsdcc_request_end(struct msmsdcc_host *host, struct mmc_request *mrq)
 
 	BUG_ON(host->curr.data);
 
-	host->curr.mrq = NULL;
-	host->curr.cmd = NULL;
-
 	del_timer(&host->req_tout_timer);
 
 	if (mrq->data)
 		mrq->data->bytes_xfered = host->curr.data_xfered;
 	if (mrq->cmd->error == -ETIMEDOUT)
 		mdelay(5);
+
+	/* Clear current request information as current request has ended */
+	memset(&host->curr, 0, sizeof(struct msmsdcc_curr_req));
 
 	/*
 	 * Need to drop the host lock here; mmc_request_done may call
@@ -309,8 +355,6 @@ msmsdcc_request_end(struct msmsdcc_host *host, struct mmc_request *mrq)
 
 	return retval;
 }
-
-static inline void msmsdcc_delay(struct msmsdcc_host *host);
 
 static void
 msmsdcc_stop_data(struct msmsdcc_host *host)
@@ -339,7 +383,7 @@ static inline void msmsdcc_delay(struct msmsdcc_host *host)
 	mb();
 	udelay(host->reg_write_delay);
 
-	if (host->plat->sdcc_v4_sup &&
+	if (host->sdcc_version &&
 		(readl_relaxed(host->base + MCI_STATUS2) &
 			MCI_MCLK_REG_WR_ACTIVE)) {
 		start = ktime_get();
@@ -361,8 +405,13 @@ static inline void
 msmsdcc_start_command_exec(struct msmsdcc_host *host, u32 arg, u32 c)
 {
 	writel_relaxed(arg, host->base + MMCIARGUMENT);
-	msmsdcc_delay(host);
 	writel_relaxed(c, host->base + MMCICOMMAND);
+	/*
+	 * As after sending the command, we don't write any of the
+	 * controller registers and just wait for the
+	 * CMD_RESPOND_END/CMD_SENT/Command failure notication
+	 * from Controller.
+	 */
 	mb();
 }
 
@@ -374,7 +423,6 @@ msmsdcc_dma_exec_func(struct msm_dmov_cmd *cmd)
 	writel_relaxed(host->cmd_timeout, host->base + MMCIDATATIMER);
 	writel_relaxed((unsigned int)host->curr.xfer_size,
 			host->base + MMCIDATALENGTH);
-	msmsdcc_delay(host);	/* Allow data parms to be applied */
 	writel_relaxed(host->cmd_datactrl, host->base + MMCIDATACTRL);
 	msmsdcc_delay(host);	/* Force delay prior to ADM or command */
 
@@ -456,10 +504,13 @@ msmsdcc_dma_complete_tlet(unsigned long data)
 		msmsdcc_stop_data(host);
 		if (!mrq->data->stop || mrq->cmd->error ||
 			(mrq->sbc && !mrq->data->error)) {
-			host->curr.mrq = NULL;
-			host->curr.cmd = NULL;
 			mrq->data->bytes_xfered = host->curr.data_xfered;
 			del_timer(&host->req_tout_timer);
+			/*
+			 * Clear current request information as current
+			 * request has ended
+			 */
+			memset(&host->curr, 0, sizeof(struct msmsdcc_curr_req));
 			spin_unlock_irqrestore(&host->lock, flags);
 
 			mmc_request_done(host->mmc, mrq);
@@ -607,15 +658,19 @@ static void msmsdcc_sps_complete_tlet(unsigned long data)
 			host->dummy_52_sent = 1;
 			msmsdcc_start_command(host, &dummy52cmd,
 					      MCI_CPSM_PROGENA);
+			spin_unlock_irqrestore(&host->lock, flags);
 			return;
 		}
 		msmsdcc_stop_data(host);
 		if (!mrq->data->stop || mrq->cmd->error ||
 			(mrq->sbc && !mrq->data->error)) {
-			host->curr.mrq = NULL;
-			host->curr.cmd = NULL;
 			mrq->data->bytes_xfered = host->curr.data_xfered;
 			del_timer(&host->req_tout_timer);
+			/*
+			 * Clear current request information as current
+			 * request has ended
+			 */
+			memset(&host->curr, 0, sizeof(struct msmsdcc_curr_req));
 			spin_unlock_irqrestore(&host->lock, flags);
 
 			mmc_request_done(host->mmc, mrq);
@@ -673,7 +728,7 @@ static inline void msmsdcc_sps_complete_tlet(unsigned long data) { }
 static inline void msmsdcc_sps_exit_curr_xfer(struct msmsdcc_host *host) { }
 #endif /* CONFIG_MMC_MSM_SPS_SUPPORT */
 
-static void msmsdcc_enable_cdr_cm_sdc4_dll(struct msmsdcc_host *host);
+static int msmsdcc_enable_cdr_cm_sdc4_dll(struct msmsdcc_host *host);
 
 static void
 msmsdcc_dma_complete_func(struct msm_dmov_cmd *cmd,
@@ -706,8 +761,9 @@ static int msmsdcc_config_dma(struct msmsdcc_host *host, struct mmc_data *data)
 	dmov_box *box;
 	uint32_t rows;
 	unsigned int n;
-	int i;
+	int i, err = 0, box_cmd_cnt = 0;
 	struct scatterlist *sg = data->sg;
+	unsigned int len, offset;
 
 	if ((host->dma.channel == -1) || (host->dma.crci == -1))
 		return -ENOENT;
@@ -717,7 +773,8 @@ static int msmsdcc_config_dma(struct msmsdcc_host *host, struct mmc_data *data)
 	host->dma.sg = data->sg;
 	host->dma.num_ents = data->sg_len;
 
-	BUG_ON(host->dma.num_ents > NR_SG); /* Prevent memory corruption */
+	/* Prevent memory corruption */
+	BUG_ON(host->dma.num_ents > msmsdcc_get_nr_sg(host));
 
 	nc = host->dma.nc;
 
@@ -726,59 +783,8 @@ static int msmsdcc_config_dma(struct msmsdcc_host *host, struct mmc_data *data)
 	else
 		host->dma.dir = DMA_TO_DEVICE;
 
-	/* host->curr.user_pages = (data->flags & MMC_DATA_USERPAGE); */
-	host->curr.user_pages = 0;
-	box = &nc->cmd[0];
-	for (i = 0; i < host->dma.num_ents; i++) {
-		box->cmd = CMD_MODE_BOX;
-
-		/* Initialize sg dma address */
-		sg->dma_address = pfn_to_dma(mmc_dev(host->mmc),
-					      page_to_pfn(sg_page(sg)))
-					      + sg->offset;
-
-		if (i == (host->dma.num_ents - 1))
-			box->cmd |= CMD_LC;
-		rows = (sg_dma_len(sg) % MCI_FIFOSIZE) ?
-			(sg_dma_len(sg) / MCI_FIFOSIZE) + 1 :
-			(sg_dma_len(sg) / MCI_FIFOSIZE) ;
-
-		if (data->flags & MMC_DATA_READ) {
-			box->src_row_addr = msmsdcc_fifo_addr(host);
-			box->dst_row_addr = sg_dma_address(sg);
-
-			box->src_dst_len = (MCI_FIFOSIZE << 16) |
-					   (MCI_FIFOSIZE);
-			box->row_offset = MCI_FIFOSIZE;
-
-			box->num_rows = rows * ((1 << 16) + 1);
-			box->cmd |= CMD_SRC_CRCI(host->dma.crci);
-		} else {
-			box->src_row_addr = sg_dma_address(sg);
-			box->dst_row_addr = msmsdcc_fifo_addr(host);
-
-			box->src_dst_len = (MCI_FIFOSIZE << 16) |
-					   (MCI_FIFOSIZE);
-			box->row_offset = (MCI_FIFOSIZE << 16);
-
-			box->num_rows = rows * ((1 << 16) + 1);
-			box->cmd |= CMD_DST_CRCI(host->dma.crci);
-		}
-		box++;
-		sg++;
-	}
-
-	/* location of command block must be 64 bit aligned */
-	BUG_ON(host->dma.cmd_busaddr & 0x07);
-
-	nc->cmdptr = (host->dma.cmd_busaddr >> 3) | CMD_PTR_LP;
-	host->dma.hdr.cmdptr = DMOV_CMD_PTR_LIST |
-			       DMOV_CMD_ADDR(host->dma.cmdptr_busaddr);
-	host->dma.hdr.complete_func = msmsdcc_dma_complete_func;
-
 	n = dma_map_sg(mmc_dev(host->mmc), host->dma.sg,
 			host->dma.num_ents, host->dma.dir);
-	/* dsb inside dma_map_sg will write nc out to mem as well */
 
 	if (n != host->dma.num_ents) {
 		pr_err("%s: Unable to map in all sg elements\n",
@@ -788,7 +794,79 @@ static int msmsdcc_config_dma(struct msmsdcc_host *host, struct mmc_data *data)
 		return -ENOMEM;
 	}
 
-	return 0;
+	/* host->curr.user_pages = (data->flags & MMC_DATA_USERPAGE); */
+	host->curr.user_pages = 0;
+	box = &nc->cmd[0];
+	for (i = 0; i < host->dma.num_ents; i++) {
+		len = sg_dma_len(sg);
+		offset = 0;
+
+		do {
+			/* Check if we can do DMA */
+			if (!len || (box_cmd_cnt >= MMC_MAX_DMA_CMDS)) {
+				err = -ENOTSUPP;
+				goto unmap;
+			}
+
+			box->cmd = CMD_MODE_BOX;
+
+			if (len >= MMC_MAX_DMA_BOX_LENGTH) {
+				len = MMC_MAX_DMA_BOX_LENGTH;
+				len -= len % data->blksz;
+			}
+			rows = (len % MCI_FIFOSIZE) ?
+				(len / MCI_FIFOSIZE) + 1 :
+				(len / MCI_FIFOSIZE);
+
+			if (data->flags & MMC_DATA_READ) {
+				box->src_row_addr = msmsdcc_fifo_addr(host);
+				box->dst_row_addr = sg_dma_address(sg) + offset;
+				box->src_dst_len = (MCI_FIFOSIZE << 16) |
+						(MCI_FIFOSIZE);
+				box->row_offset = MCI_FIFOSIZE;
+				box->num_rows = rows * ((1 << 16) + 1);
+				box->cmd |= CMD_SRC_CRCI(host->dma.crci);
+			} else {
+				box->src_row_addr = sg_dma_address(sg) + offset;
+				box->dst_row_addr = msmsdcc_fifo_addr(host);
+				box->src_dst_len = (MCI_FIFOSIZE << 16) |
+						(MCI_FIFOSIZE);
+				box->row_offset = (MCI_FIFOSIZE << 16);
+				box->num_rows = rows * ((1 << 16) + 1);
+				box->cmd |= CMD_DST_CRCI(host->dma.crci);
+			}
+
+			offset += len;
+			len = sg_dma_len(sg) - offset;
+			box++;
+			box_cmd_cnt++;
+		} while (len);
+		sg++;
+	}
+	/* Mark last command */
+	box--;
+	box->cmd |= CMD_LC;
+
+	/* location of command block must be 64 bit aligned */
+	BUG_ON(host->dma.cmd_busaddr & 0x07);
+
+	nc->cmdptr = (host->dma.cmd_busaddr >> 3) | CMD_PTR_LP;
+	host->dma.hdr.cmdptr = DMOV_CMD_PTR_LIST |
+			       DMOV_CMD_ADDR(host->dma.cmdptr_busaddr);
+	host->dma.hdr.complete_func = msmsdcc_dma_complete_func;
+
+	/* Flush all data to memory before starting dma */
+	mb();
+
+unmap:
+	if (err) {
+		dma_unmap_sg(mmc_dev(host->mmc), host->dma.sg,
+				host->dma.num_ents, host->dma.dir);
+		pr_err("%s: cannot do DMA, fall back to PIO mode err=%d\n",
+				mmc_hostname(host->mmc), err);
+	}
+
+	return err;
 }
 
 #ifdef CONFIG_MMC_MSM_SPS_SUPPORT
@@ -814,7 +892,8 @@ static int msmsdcc_sps_start_xfer(struct msmsdcc_host *host,
 	struct scatterlist *sg = data->sg;
 	struct sps_pipe *sps_pipe_handle;
 
-	BUG_ON(data->sg_len > NR_SG); /* Prevent memory corruption */
+	/* Prevent memory corruption */
+	BUG_ON(data->sg_len > msmsdcc_get_nr_sg(host));
 
 	host->sps.sg = data->sg;
 	host->sps.num_ents = data->sg_len;
@@ -909,9 +988,11 @@ msmsdcc_start_command_deferred(struct msmsdcc_host *host,
 	if (/*interrupt*/0)
 		*c |= MCI_CPSM_INTERRUPT;
 
-	if ((((cmd->opcode == 17) || (cmd->opcode == 18))  ||
-	     ((cmd->opcode == 24) || (cmd->opcode == 25))) ||
-	      (cmd->opcode == 53))
+	if (cmd->opcode == MMC_READ_SINGLE_BLOCK ||
+		cmd->opcode == MMC_READ_MULTIPLE_BLOCK ||
+		cmd->opcode == MMC_WRITE_BLOCK ||
+		cmd->opcode == MMC_WRITE_MULTIPLE_BLOCK ||
+		cmd->opcode == SD_IO_RW_EXTENDED)
 		*c |= MCI_CSPM_DATCMD;
 
 	/* Check if AUTO CMD19 is required or not? */
@@ -922,16 +1003,24 @@ msmsdcc_start_command_deferred(struct msmsdcc_host *host,
 		 * For close ended block read operation (with CMD23),
 		 * AUTO_CMD19 bit should be set while sending CMD23.
 		 */
-		if ((cmd->opcode == 23 && (host->curr.mrq->cmd->opcode == 17 ||
-			host->curr.mrq->cmd->opcode == 18)) ||
+		if ((cmd->opcode == MMC_SET_BLOCK_COUNT &&
+			host->curr.mrq->cmd->opcode ==
+				MMC_READ_MULTIPLE_BLOCK) ||
 			(!host->curr.mrq->sbc &&
-			(cmd->opcode == 17 || cmd->opcode == 18))) {
+			(cmd->opcode == MMC_READ_SINGLE_BLOCK ||
+			cmd->opcode == MMC_READ_MULTIPLE_BLOCK))) {
 			msmsdcc_enable_cdr_cm_sdc4_dll(host);
 			*c |= MCI_CSPM_AUTO_CMD19;
 		}
 	}
 
-	if (host->prog_scan && (cmd->opcode == 12)) {
+	/* Clear CDR_EN bit for write operations */
+	if (host->tuning_needed && cmd->mrq->data &&
+			(cmd->mrq->data->flags & MMC_DATA_WRITE))
+		writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG) &
+				~MCI_CDR_EN), host->base + MCI_DLL_CONFIG);
+
+	if ((cmd->flags & MMC_RSP_R1B) == MMC_RSP_R1B) {
 		*c |= MCI_CPSM_PROGENA;
 		host->prog_enable = 1;
 	}
@@ -955,14 +1044,15 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 	void __iomem *base = host->base;
 	unsigned int pio_irqmask = 0;
 
+	BUG_ON(!data->sg);
+	BUG_ON(!data->sg_len);
+
 	host->curr.data = data;
 	host->curr.xfer_size = data->blksz * data->blocks;
 	host->curr.xfer_remain = host->curr.xfer_size;
 	host->curr.data_xfered = 0;
 	host->curr.got_dataend = 0;
 	host->curr.got_auto_prog_done = 0;
-
-	memset(&host->pio, 0, sizeof(host->pio));
 
 	datactrl = MCI_DPSM_ENABLE | (data->blksz << 4);
 
@@ -998,10 +1088,6 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 
 	/* Is data transfer in PIO mode required? */
 	if (!(datactrl & MCI_DPSM_DMAENABLE)) {
-		host->pio.sg = data->sg;
-		host->pio.sg_len = data->sg_len;
-		host->pio.sg_off = 0;
-
 		if (data->flags & MMC_DATA_READ) {
 			pio_irqmask = MCI_RXFIFOHALFFULLMASK;
 			if (host->curr.xfer_remain < MCI_FIFOSIZE)
@@ -1009,6 +1095,8 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 		} else
 			pio_irqmask = MCI_TXFIFOHALFEMPTYMASK |
 					MCI_TXFIFOEMPTYMASK;
+
+		msmsdcc_sg_start(host);
 	}
 
 	if (data->flags & MMC_DATA_READ)
@@ -1029,8 +1117,6 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 		host->dma.hdr.exec_func = msmsdcc_dma_exec_func;
 		host->dma.hdr.user = (void *)host;
 		host->dma.busy = 1;
-		if ((data->flags & MMC_DATA_WRITE) && !host->curr.mrq->sbc)
-			host->prog_scan = 1;
 
 		if (cmd) {
 			msmsdcc_start_command_deferred(host, cmd, &c);
@@ -1043,8 +1129,6 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 		msm_dmov_enqueue_cmd_ext(host->dma.channel, &host->dma.hdr);
 	} else {
 		/* SPS-BAM mode or PIO mode */
-		if ((data->flags & MMC_DATA_WRITE) && !host->curr.mrq->sbc)
-			host->prog_scan = 1;
 		writel_relaxed(timeout, base + MMCIDATATIMER);
 
 		writel_relaxed(host->curr.xfer_size, base + MMCIDATALENGTH);
@@ -1052,8 +1136,14 @@ msmsdcc_start_data(struct msmsdcc_host *host, struct mmc_data *data,
 		writel_relaxed((readl_relaxed(host->base + MMCIMASK0) &
 				(~(MCI_IRQ_PIO))) | pio_irqmask,
 				host->base + MMCIMASK0);
-		msmsdcc_delay(host);	/* Allow parms to be applied */
 		writel_relaxed(datactrl, base + MMCIDATACTRL);
+		/*
+		 * We don't need delay after writing to DATA_CTRL register
+		 * if we are not writing to CMD register immediately after
+		 * this. As we already have delay before sending the
+		 * command, we just need mb() here.
+		 */
+		mb();
 
 		if (cmd) {
 			msmsdcc_delay(host); /* Delay between data/command */
@@ -1093,9 +1183,11 @@ msmsdcc_data_err(struct msmsdcc_host *host, struct mmc_data *data,
 		 */
 		if (!(data->mrq->cmd->opcode == MMC_BUS_TEST_W
 			|| data->mrq->cmd->opcode == MMC_BUS_TEST_R)) {
-			pr_err("%s: Data timeout\n",
-				 mmc_hostname(host->mmc));
+			pr_err("%s: CMD%d: Data timeout\n",
+				 mmc_hostname(host->mmc),
+				 data->mrq->cmd->opcode);
 			data->error = -ETIMEDOUT;
+			msmsdcc_dump_sdcc_state(host);
 		}
 	} else if (status & MCI_RXOVERRUN) {
 		pr_err("%s: RX overrun\n", mmc_hostname(host->mmc));
@@ -1164,12 +1256,153 @@ msmsdcc_pio_write(struct msmsdcc_host *host, char *buffer,
 	return ptr - buffer;
 }
 
+/*
+ * Copy up to a word (4 bytes) between a scatterlist
+ * and a temporary bounce buffer when the word lies across
+ * two pages. The temporary buffer can then be read to/
+ * written from the FIFO once.
+ */
+static void _msmsdcc_sg_consume_word(struct msmsdcc_host *host)
+{
+	struct msmsdcc_pio_data *pio = &host->pio;
+	unsigned int bytes_avail;
+
+	if (host->curr.data->flags & MMC_DATA_READ)
+		memcpy(pio->sg_miter.addr, pio->bounce_buf,
+		       pio->bounce_buf_len);
+	else
+		memcpy(pio->bounce_buf, pio->sg_miter.addr,
+		       pio->bounce_buf_len);
+
+	while (pio->bounce_buf_len != 4) {
+		if (!sg_miter_next(&pio->sg_miter))
+			break;
+		bytes_avail = min_t(unsigned int, pio->sg_miter.length,
+			4 - pio->bounce_buf_len);
+		if (host->curr.data->flags & MMC_DATA_READ)
+			memcpy(pio->sg_miter.addr,
+			       &pio->bounce_buf[pio->bounce_buf_len],
+			       bytes_avail);
+		else
+			memcpy(&pio->bounce_buf[pio->bounce_buf_len],
+			       pio->sg_miter.addr, bytes_avail);
+
+		pio->sg_miter.consumed = bytes_avail;
+		pio->bounce_buf_len += bytes_avail;
+	}
+}
+
+/*
+ * Use sg_miter_next to return as many 4-byte aligned
+ * chunks as possible, using a temporary 4 byte buffer
+ * for alignment if necessary
+ */
+static int msmsdcc_sg_next(struct msmsdcc_host *host, char **buf, int *len)
+{
+	struct msmsdcc_pio_data *pio = &host->pio;
+	unsigned int length, rlength;
+	char *buffer;
+
+	if (!sg_miter_next(&pio->sg_miter))
+		return 0;
+
+	buffer = pio->sg_miter.addr;
+	length = pio->sg_miter.length;
+
+	if (length < host->curr.xfer_remain) {
+		rlength = round_down(length, 4);
+		if (rlength) {
+			/*
+			 * We have a 4-byte aligned chunk.
+			 * The rounding will be reflected by
+			 * a call to msmsdcc_sg_consumed
+			 */
+			length = rlength;
+			goto sg_next_end;
+		}
+		/*
+		 * We have a length less than 4 bytes. Check to
+		 * see if more buffer is available, and combine
+		 * to make 4 bytes if possible.
+		 */
+		pio->bounce_buf_len = length;
+		memset(pio->bounce_buf, 0, 4);
+
+		/*
+		 * On a read, get 4 bytes from FIFO, and distribute
+		 * (4-bouce_buf_len) bytes into consecutive
+		 * sgl buffers when msmsdcc_sg_consumed is called
+		 */
+		if (host->curr.data->flags & MMC_DATA_READ) {
+			buffer = pio->bounce_buf;
+			length = 4;
+			goto sg_next_end;
+		} else {
+			_msmsdcc_sg_consume_word(host);
+			buffer = pio->bounce_buf;
+			length = pio->bounce_buf_len;
+		}
+	}
+
+sg_next_end:
+	*buf = buffer;
+	*len = length;
+	return 1;
+}
+
+/*
+ * Update sg_miter.consumed based on how many bytes were
+ * consumed. If the bounce buffer was used to read from FIFO,
+ * redistribute into sgls.
+ */
+static void msmsdcc_sg_consumed(struct msmsdcc_host *host,
+				unsigned int length)
+{
+	struct msmsdcc_pio_data *pio = &host->pio;
+
+	if (host->curr.data->flags & MMC_DATA_READ) {
+		if (length > pio->sg_miter.consumed)
+			/*
+			 * consumed 4 bytes, but sgl
+			 * describes < 4 bytes
+			 */
+			_msmsdcc_sg_consume_word(host);
+		else
+			pio->sg_miter.consumed = length;
+	} else
+		if (length < pio->sg_miter.consumed)
+			pio->sg_miter.consumed = length;
+}
+
+static void msmsdcc_sg_start(struct msmsdcc_host *host)
+{
+	unsigned int sg_miter_flags = SG_MITER_ATOMIC;
+
+	host->pio.bounce_buf_len = 0;
+
+	if (host->curr.data->flags & MMC_DATA_READ)
+		sg_miter_flags |= SG_MITER_TO_SG;
+	else
+		sg_miter_flags |= SG_MITER_FROM_SG;
+
+	sg_miter_start(&host->pio.sg_miter, host->curr.data->sg,
+		       host->curr.data->sg_len, sg_miter_flags);
+}
+
+static void msmsdcc_sg_stop(struct msmsdcc_host *host)
+{
+	sg_miter_stop(&host->pio.sg_miter);
+}
+
 static irqreturn_t
 msmsdcc_pio_irq(int irq, void *dev_id)
 {
 	struct msmsdcc_host	*host = dev_id;
 	void __iomem		*base = host->base;
 	uint32_t		status;
+	unsigned long flags;
+	unsigned int remain;
+	char *buffer;
 
 	spin_lock(&host->lock);
 
@@ -1180,26 +1413,20 @@ msmsdcc_pio_irq(int irq, void *dev_id)
 		spin_unlock(&host->lock);
 		return IRQ_NONE;
 	}
-
 #if IRQ_DEBUG
 	msmsdcc_print_status(host, "irq1-r", status);
 #endif
+	local_irq_save(flags);
 
 	do {
-		unsigned long flags;
-		unsigned int remain, len;
-		char *buffer;
+		unsigned int len;
 
 		if (!(status & (MCI_TXFIFOHALFEMPTY | MCI_TXFIFOEMPTY
 				| MCI_RXDATAAVLBL)))
 			break;
 
-		/* Map the current scatter buffer */
-		local_irq_save(flags);
-		buffer = kmap_atomic(sg_page(host->pio.sg),
-				     KM_BIO_SRC_IRQ) + host->pio.sg->offset;
-		buffer += host->pio.sg_off;
-		remain = host->pio.sg->length - host->pio.sg_off;
+		if (!msmsdcc_sg_next(host, &buffer, &remain))
+			break;
 
 		len = 0;
 		if (status & MCI_RXACTIVE)
@@ -1207,40 +1434,33 @@ msmsdcc_pio_irq(int irq, void *dev_id)
 		if (status & MCI_TXACTIVE)
 			len = msmsdcc_pio_write(host, buffer, remain);
 
-		/* Unmap the buffer */
-		kunmap_atomic(buffer, KM_BIO_SRC_IRQ);
-		local_irq_restore(flags);
+		/* len might have aligned to 32bits above */
+		if (len > remain)
+			len = remain;
 
-		host->pio.sg_off += len;
 		host->curr.xfer_remain -= len;
 		host->curr.data_xfered += len;
 		remain -= len;
+		msmsdcc_sg_consumed(host, len);
 
 		if (remain) /* Done with this page? */
 			break; /* Nope */
 
-		if (status & MCI_RXACTIVE && host->curr.user_pages)
-			flush_dcache_page(sg_page(host->pio.sg));
-
-		if (!--host->pio.sg_len) {
-			memset(&host->pio, 0, sizeof(host->pio));
-			break;
-		}
-
-		/* Advance to next sg */
-		host->pio.sg++;
-		host->pio.sg_off = 0;
-
 		status = readl_relaxed(base + MMCISTATUS);
 	} while (1);
+
+	msmsdcc_sg_stop(host);
+	local_irq_restore(flags);
 
 	if (status & MCI_RXACTIVE && host->curr.xfer_remain < MCI_FIFOSIZE) {
 		writel_relaxed((readl_relaxed(host->base + MMCIMASK0) &
 				(~(MCI_IRQ_PIO))) | MCI_RXDATAAVLBLMASK,
 				host->base + MMCIMASK0);
 		if (!host->curr.xfer_remain) {
-			/* Delay needed (same port was just written) */
-			msmsdcc_delay(host);
+			/*
+			 * back to back write to MASK0 register don't need
+			 * synchronization delay.
+			 */
 			writel_relaxed((readl_relaxed(host->base + MMCIMASK0) &
 				(~(MCI_IRQ_PIO))) | 0, host->base + MMCIMASK0);
 		}
@@ -1304,11 +1524,14 @@ static void msmsdcc_do_cmdirq(struct msmsdcc_host *host, uint32_t status)
 	cmd->resp[3] = readl_relaxed(host->base + MMCIRESPONSE3);
 
 	if (status & (MCI_CMDTIMEOUT | MCI_AUTOCMD19TIMEOUT)) {
-		pr_debug("%s: Command timeout\n", mmc_hostname(host->mmc));
+		pr_debug("%s: CMD%d: Command timeout\n",
+				mmc_hostname(host->mmc), cmd->opcode);
 		cmd->error = -ETIMEDOUT;
 	} else if ((status & MCI_CMDCRCFAIL && cmd->flags & MMC_RSP_CRC) &&
 			!host->cmd19_tuning_in_progress) {
-		pr_err("%s: Command CRC error\n", mmc_hostname(host->mmc));
+		pr_err("%s: CMD%d: Command CRC error\n",
+			mmc_hostname(host->mmc), cmd->opcode);
+		msmsdcc_dump_sdcc_state(host);
 		cmd->error = -EILSEQ;
 	}
 
@@ -1329,16 +1552,13 @@ static void msmsdcc_do_cmdirq(struct msmsdcc_host *host, uint32_t status)
 		} else { /* host->data == NULL */
 			if (!cmd->error && host->prog_enable) {
 				if (status & MCI_PROGDONE) {
-					host->prog_scan = 0;
 					host->prog_enable = 0;
-					 msmsdcc_request_end(host, cmd->mrq);
+					msmsdcc_request_end(host, cmd->mrq);
 				} else
 					host->curr.cmd = cmd;
 			} else {
-				if (host->prog_enable) {
-					host->prog_scan = 0;
-					host->prog_enable = 0;
-				}
+				host->prog_enable = 0;
+				host->curr.wait_for_auto_prog_done = 0;
 				if (host->dummy_52_needed)
 					host->dummy_52_needed = 0;
 				if (cmd->data && cmd->error)
@@ -1453,7 +1673,7 @@ msmsdcc_irq(int irq, void *dev_id)
 			msmsdcc_do_cmdirq(host, status);
 		}
 
-		if (data) {
+		if (host->curr.data) {
 			/* Check for data errors */
 			if (status & (MCI_DATACRCFAIL|MCI_DATATIMEOUT|
 				      MCI_TXUNDERRUN|MCI_RXOVERRUN)) {
@@ -1620,7 +1840,7 @@ msmsdcc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	if (mrq->data && (mrq->data->flags & MMC_DATA_WRITE)) {
 		if (mrq->cmd->opcode == SD_IO_RW_EXTENDED ||
 			mrq->cmd->opcode == 54) {
-			if (!host->plat->sdcc_v4_sup)
+			if (!host->sdcc_version)
 				host->dummy_52_needed = 1;
 			else
 				/*
@@ -1631,6 +1851,9 @@ msmsdcc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				 * without the need of sending dummy CMD52.
 				 */
 				host->curr.wait_for_auto_prog_done = 1;
+		} else if (mrq->cmd->opcode == MMC_WRITE_BLOCK &&
+				host->sdcc_version) {
+			host->curr.wait_for_auto_prog_done = 1;
 		}
 	}
 
@@ -1672,16 +1895,20 @@ static inline int msmsdcc_vreg_set_optimum_mode(struct msm_mmc_reg_data *vreg,
 {
 	int rc = 0;
 
-	rc = regulator_set_optimum_mode(vreg->reg, uA_load);
-	if (rc < 0)
-		pr_err("%s: regulator_set_optimum_mode(reg=%s, uA_load=%d)"
-			" failed. rc=%d\n", __func__, vreg->name,
-			uA_load, rc);
-	else
-		/* regulator_set_optimum_mode() can return non zero value
-		 * even for success case.
-		 */
-		rc = 0;
+	/* regulators that do not support regulator_set_voltage also
+	   do not support regulator_set_optimum_mode */
+	if (vreg->set_voltage_sup) {
+		rc = regulator_set_optimum_mode(vreg->reg, uA_load);
+		if (rc < 0)
+			pr_err("%s: regulator_set_optimum_mode(reg=%s, "
+				"uA_load=%d) failed. rc=%d\n", __func__,
+				vreg->name, uA_load, rc);
+		else
+			/* regulator_set_optimum_mode() can return non zero
+			 * value even for success case.
+			 */
+			rc = 0;
+	}
 
 	return rc;
 }
@@ -1701,7 +1928,12 @@ static inline int msmsdcc_vreg_init_reg(struct msm_mmc_reg_data *vreg,
 		rc = PTR_ERR(vreg->reg);
 		pr_err("%s: regulator_get(%s) failed. rc=%d\n",
 			__func__, vreg->name, rc);
+		goto out;
 	}
+
+	if (regulator_count_voltages(vreg->reg) > 0)
+		vreg->set_voltage_sup = 1;
+
 out:
 	return rc;
 }
@@ -1748,6 +1980,10 @@ static int msmsdcc_vreg_init(struct msmsdcc_host *host, bool is_init)
 			if (rc)
 				goto vccq_reg_deinit;
 		}
+		rc = msmsdcc_vreg_reset(host);
+		if (rc)
+			pr_err("msmsdcc.%d vreg reset failed (%d)\n",
+			       host->pdev_id, rc);
 		goto out;
 	} else {
 		/* Deregister all regulators from regulator framework */
@@ -1856,6 +2092,21 @@ out:
 	return rc;
 }
 
+/*
+ * Reset vreg by ensuring it is off during probe. A call
+ * to enable vreg is needed to balance disable vreg
+ */
+static int msmsdcc_vreg_reset(struct msmsdcc_host *host)
+{
+	int rc;
+
+	rc = msmsdcc_setup_vreg(host, 1);
+	if (rc)
+		return rc;
+	rc = msmsdcc_setup_vreg(host, 0);
+	return rc;
+}
+
 static int msmsdcc_set_vddp_level(struct msmsdcc_host *host, int level)
 {
 	int rc = 0;
@@ -1922,7 +2173,9 @@ static inline void msmsdcc_setup_clocks(struct msmsdcc_host *host, bool enable)
 		if (!IS_ERR(host->pclk))
 			clk_enable(host->pclk);
 		clk_enable(host->clk);
+		msmsdcc_delay(host);
 	} else {
+		msmsdcc_delay(host);
 		clk_disable(host->clk);
 		if (!IS_ERR(host->pclk))
 			clk_disable(host->pclk);
@@ -2097,7 +2350,9 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	int rc;
 	unsigned long flags;
 	unsigned int clock;
-
+#ifdef CONFIG_PANTECH_MMC
+	unsigned slot_status;
+#endif
 	DBG(host, "ios->clock = %u\n", ios->clock);
 
 	if (ios->clock) {
@@ -2120,6 +2375,10 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 					writel_relaxed(host->mci_irqenable,
 							host->base + MMCIMASK0);
 				}
+			} else {
+				writel_relaxed(host->mci_irqenable,
+						host->base + MMCIMASK0);
+				mb();
 			}
 		}
 		spin_unlock_irqrestore(&host->lock, flags);
@@ -2149,7 +2408,7 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		if (clock != host->clk_rate) {
 			rc = clk_set_rate(host->clk, clock);
 			if (rc < 0)
-				pr_debug("%s: failed to set clk rate %u\n",
+				pr_err("%s: failed to set clk rate %u\n",
 						mmc_hostname(mmc), clock);
 			host->clk_rate = clock;
 			host->reg_write_delay =
@@ -2182,8 +2441,7 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	 * Select the controller timing mode according
 	 * to current bus speed mode
 	 */
-	if ((ios->timing == MMC_TIMING_UHS_SDR104) ||
-		(ios->timing == MMC_TIMING_UHS_SDR50)) {
+	if (ios->timing == MMC_TIMING_UHS_SDR104) {
 		clk |= (4 << 14);
 		host->tuning_needed = 1;
 	} else if (ios->timing == MMC_TIMING_UHS_DDR50) {
@@ -2195,14 +2453,58 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	/* Select free running MCLK as input clock of cm_dll_sdc4 */
 	clk |= (2 << 23);
 
+	/* Clear IO_PAD_PWR_SWITCH while powering off the card */
+	if (!ios->vdd)
+		host->io_pad_pwr_switch = 0;
+
 	if (host->io_pad_pwr_switch)
 		clk |= IO_PAD_PWR_SWITCH;
 
-	if (host->plat->translate_vdd && !host->sdio_gpio_lpm)
+	if (host->plat->translate_vdd && !host->sdio_gpio_lpm){
+#if CONFIG_PANTECH_MMC  // 20120414_LS1 temp
+        if(host->pdev_id == 3 && ios->power_mode == MMC_POWER_OFF){
+            slot_status = msmsdcc_slot_status(host);
+            if(mmc->bus_ops != NULL && slot_status){
+                pwr |= host->plat->translate_vdd(mmc_dev(mmc), 1); /* always on sdcc power */
+            } else {
+            	pwr |= host->plat->translate_vdd(mmc_dev(mmc), ios->vdd);
+                /* case sdcc_inserted & normal status */
+	            if(!mmc->bus_ops && slot_status)
+	                msleep(500);
+            }
+        } else {
+           pwr |= host->plat->translate_vdd(mmc_dev(mmc), ios->vdd);    
+        }
+#else
 		pwr |= host->plat->translate_vdd(mmc_dev(mmc), ios->vdd);
-	else if (!host->plat->translate_vdd && !host->sdio_gpio_lpm)
+#endif
+	}
+	else if (!host->plat->translate_vdd && !host->sdio_gpio_lpm){
+#if CONFIG_PANTECH_MMC  // 20120414_LS1 temp
+		if(host->pdev_id == 3 && ios->power_mode == MMC_POWER_OFF){
+			slot_status = msmsdcc_slot_status(host);
+			if(mmc->bus_ops != NULL && slot_status){
+				pwr |= msmsdcc_setup_vreg(host, 1); /* always on sdcc power */
+			} else {
+			pwr |= msmsdcc_setup_vreg(host, !!ios->vdd);
+				/* case sdcc_inserted & normal status */
+			if(!mmc->bus_ops && slot_status)
+				msleep(500);
+			}
+		} else {
+		   pwr |= msmsdcc_setup_vreg(host, !!ios->vdd);	  
+		}
+#else
 		pwr |= msmsdcc_setup_vreg(host, !!ios->vdd);
+#endif
+	}
 
+	if (pwr) {
+		pr_err("%s: Failed to setup voltage regulators\n",
+				mmc_hostname(host->mmc));
+		goto out;
+	}
+	
 	switch (ios->power_mode) {
 	case MMC_POWER_OFF:
 		htc_pwrsink_set(PWRSINK_SDCARD, 0);
@@ -2222,6 +2524,7 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		msmsdcc_setup_pins(host, false);
 		break;
 	case MMC_POWER_UP:
+		/* writing PWR_UP bit is redundant */
 		pwr |= MCI_PWR_UP;
 		if (host->sdcc_irq_disabled) {
 			if (host->plat->cfg_mpm_sdiowakeup)
@@ -2239,6 +2542,8 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		break;
 	}
 
+out:
+
 	spin_lock_irqsave(&host->lock, flags);
 	if (!host->clks_on) {
 		/* force the clocks to be on */
@@ -2255,7 +2560,7 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	if (host->pwr != pwr) {
 		host->pwr = pwr;
 		writel_relaxed(pwr, host->base + MMCIPOWER);
-		mb();
+		msmsdcc_delay(host);
 	}
 	if (!host->clks_on) {
 		/* force the clocks to be off */
@@ -2279,11 +2584,16 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 				writel_relaxed(MCI_SDIOINTMASK,
 						host->base + MMCIMASK0);
 			}
-			msmsdcc_delay(host);
+			mb();
 		}
 		msmsdcc_setup_clocks(host, false);
 		host->clks_on = 0;
 	}
+
+	if (host->cmd19_tuning_in_progress)
+		WARN(!host->clks_on,
+			"cmd19_tuning_in_progress but SDCC clocks are OFF\n");
+
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
@@ -2299,7 +2609,7 @@ int msmsdcc_set_pwrsave(struct mmc_host *mmc, int pwrsave)
 	else
 		clk &= ~MCI_CLK_PWRSAVE;
 	writel_relaxed(clk, host->base + MMCICLOCK);
-	mb();
+	msmsdcc_delay(host);
 
 	return 0;
 }
@@ -2368,6 +2678,12 @@ static int msmsdcc_enable(struct mmc_host *mmc)
 {
 	int rc;
 	struct device *dev = mmc->parent;
+	struct msmsdcc_host *host = mmc_priv(mmc);
+
+	msmsdcc_pm_qos_update_latency(host, 1);
+
+	if (mmc->card && mmc_card_sdio(mmc->card) && host->is_resumed)
+		return 0;
 
 	if (dev->power.runtime_status == RPM_SUSPENDING) {
 		if (mmc->suspend_task == current) {
@@ -2383,6 +2699,8 @@ static int msmsdcc_enable(struct mmc_host *mmc)
 				__func__, rc);
 		return rc;
 	}
+
+	host->is_resumed = true;
 out:
 	return 0;
 }
@@ -2392,9 +2710,12 @@ static int msmsdcc_disable(struct mmc_host *mmc, int lazy)
 	int rc;
 	struct msmsdcc_host *host = mmc_priv(mmc);
 
+	msmsdcc_pm_qos_update_latency(host, 0);
+
+	if (mmc->card && mmc_card_sdio(mmc->card))
+		return 0;
+
 	if (host->plat->disable_runtime_pm)
-		return -ENOTSUPP;
-	if (mmc->card && mmc->card->type == MMC_TYPE_SDIO)
 		return -ENOTSUPP;
 
 	rc = pm_runtime_put_sync(mmc->parent);
@@ -2402,11 +2723,48 @@ static int msmsdcc_disable(struct mmc_host *mmc, int lazy)
 	if (rc < 0)
 		pr_info("%s: %s: failed with error %d", mmc_hostname(mmc),
 				__func__, rc);
+	else
+		host->is_resumed = false;
+
 	return rc;
 }
 #else
-#define msmsdcc_enable NULL
-#define msmsdcc_disable NULL
+static int msmsdcc_enable(struct mmc_host *mmc)
+{
+	struct msmsdcc_host *host = mmc_priv(mmc);
+	unsigned long flags;
+
+	msmsdcc_pm_qos_update_latency(host, 1);
+
+	spin_lock_irqsave(&host->lock, flags);
+	if (!host->clks_on) {
+		msmsdcc_setup_clocks(host, true);
+		host->clks_on = 1;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	return 0;
+}
+
+static int msmsdcc_disable(struct mmc_host *mmc, int lazy)
+{
+	struct msmsdcc_host *host = mmc_priv(mmc);
+	unsigned long flags;
+
+	msmsdcc_pm_qos_update_latency(host, 0);
+
+	if (mmc->card && mmc_card_sdio(mmc->card))
+		return 0;
+
+	spin_lock_irqsave(&host->lock, flags);
+	if (host->clks_on) {
+		msmsdcc_setup_clocks(host, false);
+		host->clks_on = 0;
+	}
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	return 0;
+}
 #endif
 
 static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
@@ -2415,6 +2773,10 @@ static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
 	struct msmsdcc_host *host = mmc_priv(mmc);
 	unsigned long flags;
 	int rc = 0;
+
+	spin_lock_irqsave(&host->lock, flags);
+	host->io_pad_pwr_switch = 0;
+	spin_unlock_irqrestore(&host->lock, flags);
 
 	if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_330) {
 		/* Change voltage level of VDDPX to high voltage */
@@ -2446,7 +2808,7 @@ static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
 	/* Stop SD CLK output. */
 	writel_relaxed((readl_relaxed(host->base + MMCICLOCK) |
 			MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
-
+	msmsdcc_delay(host);
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	/*
@@ -2460,6 +2822,7 @@ static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
 	spin_lock_irqsave(&host->lock, flags);
 	writel_relaxed((readl_relaxed(host->base + MMCICLOCK) |
 			IO_PAD_PWR_SWITCH), host->base + MMCICLOCK);
+	msmsdcc_delay(host);
 	host->io_pad_pwr_switch = 1;
 	spin_unlock_irqrestore(&host->lock, flags);
 
@@ -2467,9 +2830,10 @@ static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
 	usleep_range(5000, 5500);
 
 	spin_lock_irqsave(&host->lock, flags);
-	/* Start SD CLK output. */
+	/* Disable PWRSAVE would make sure that SD CLK is always running */
 	writel_relaxed((readl_relaxed(host->base + MMCICLOCK)
 			& ~MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
+	msmsdcc_delay(host);
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	/*
@@ -2490,102 +2854,17 @@ static int msmsdcc_start_signal_voltage_switch(struct mmc_host *mmc,
 	}
 
 out_unlock:
+	/* Enable PWRSAVE */
+	writel_relaxed((readl_relaxed(host->base + MMCICLOCK) |
+			MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
 	spin_unlock_irqrestore(&host->lock, flags);
 out:
 	return rc;
 }
 
-static int msmsdcc_config_cm_sdc4_dll_phase(struct msmsdcc_host *host,
-						u8 phase);
-/* Initialize the DLL (Programmable Delay Line ) */
-static int msmsdcc_init_cm_sdc4_dll(struct msmsdcc_host *host)
+static inline void msmsdcc_cm_sdc4_dll_set_freq(struct msmsdcc_host *host)
 {
-	int rc = 0;
-	u32 wait_timeout;
-
-	/* Write 0 to DLL_PDN bit of MCI_DLL_CONFIG register */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~MCI_DLL_PDN), host->base + MCI_DLL_CONFIG);
-
-	/* Write 1 to DLL_RST bit of MCI_DLL_CONFIG register */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			| MCI_DLL_RST), host->base + MCI_DLL_CONFIG);
-
-	msmsdcc_delay(host);
-
-	/* Write 0 to DLL_RST bit of MCI_DLL_CONFIG register */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~MCI_DLL_RST), host->base + MCI_DLL_CONFIG);
-
-	/* Initialize the phase to 0 */
-	rc = msmsdcc_config_cm_sdc4_dll_phase(host, 0);
-	if (rc)
-		goto out;
-
-	wait_timeout = 1000;
-	/* Wait until DLL_LOCK bit of MCI_DLL_STATUS register becomes '1' */
-	while (!(readl_relaxed(host->base + MCI_DLL_STATUS) & MCI_DLL_LOCK)) {
-		/* max. wait for 1 sec for LOCK bit to be set */
-		if (--wait_timeout == 0) {
-			pr_err("%s: %s: DLL failed to lock at phase: %d",
-				mmc_hostname(host->mmc), __func__, 0);
-			rc = -1;
-			goto out;
-		}
-		/* wait for 1ms */
-		usleep_range(1000, 1500);
-	}
-out:
-	return rc;
-}
-
-/*
- * Enable a CDR circuit in CM_SDC4_DLL block to enable automatic
- * calibration sequence. This function should be called before
- * enabling AUTO_CMD19 bit in MCI_CMD register for block read
- * commands (CMD17/CMD18).
- */
-static void msmsdcc_enable_cdr_cm_sdc4_dll(struct msmsdcc_host *host)
-{
-	/* Set CDR_EN bit to 1. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG) |
-			MCI_CDR_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Set CDR_EXT_EN bit to 0. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~MCI_CDR_EXT_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Set CK_OUT_EN bit to 0. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '0' */
-	while (readl_relaxed(host->base + MCI_DLL_CONFIG) & MCI_CK_OUT_EN)
-		;
-
-	/* Set CK_OUT_EN bit of MCI_DLL_CONFIG register to 1. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			| MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register is 1. */
-	while (!(readl_relaxed(host->base + MCI_DLL_CONFIG) & MCI_CK_OUT_EN))
-		;
-}
-
-static int msmsdcc_config_cm_sdc4_dll_phase(struct msmsdcc_host *host,
-						u8 phase)
-{
-	int rc = 0;
 	u32 mclk_freq = 0;
-	u32 wait_timeout;
-
-	/* Set CDR_EN bit to 0. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~MCI_CDR_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Set CDR_EXT_EN bit to 1. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			| MCI_CDR_EXT_EN), host->base + MCI_DLL_CONFIG);
 
 	/* Program the MCLK value to MCLK_FREQ bit field */
 	if (host->clk_rate <= 112000000)
@@ -2608,73 +2887,16 @@ static int msmsdcc_config_cm_sdc4_dll_phase(struct msmsdcc_host *host,
 	writel_relaxed(((readl_relaxed(host->base + MCI_DLL_CONFIG)
 			& ~(7 << 24)) | (mclk_freq << 24)),
 			host->base + MCI_DLL_CONFIG);
-
-	/* Set CK_OUT_EN bit to 0. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-		& ~MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
-
-	/* Set DLL_EN bit to 1. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			| MCI_DLL_EN), host->base + MCI_DLL_CONFIG);
-
-	wait_timeout = 1000;
-	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '0' */
-	while (readl_relaxed(host->base + MCI_DLL_CONFIG) & MCI_CK_OUT_EN) {
-		/* max. wait for 1 sec for LOCK bit for be set */
-		if (--wait_timeout == 0) {
-			pr_err("%s: %s: Failed to set DLL phase: %d, CK_OUT_EN bit is not 0",
-				mmc_hostname(host->mmc), __func__, phase);
-			rc = -1;
-			goto out;
-		}
-		/* wait for 1ms */
-		usleep_range(1000, 1500);
-	}
-
-	/*
-	 * Write the selected DLL clock output phase (0 ... 15)
-	 * to CDR_SELEXT bit field of MCI_DLL_CONFIG register.
-	 */
-	writel_relaxed(((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			& ~(0xF << 20)) | (phase << 20)),
-			host->base + MCI_DLL_CONFIG);
-
-	/* Set CK_OUT_EN bit of MCI_DLL_CONFIG register to 1. */
-	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
-			| MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
-
-	wait_timeout = 1000;
-	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '1' */
-	while (!(readl_relaxed(host->base + MCI_DLL_CONFIG) & MCI_CK_OUT_EN)) {
-		/* max. wait for 1 sec for LOCK bit for be set */
-		if (--wait_timeout == 0) {
-			pr_err("%s: %s: Failed to set DLL phase: %d, CK_OUT_EN bit is not 1",
-				mmc_hostname(host->mmc), __func__, phase);
-			rc = -1;
-			goto out;
-		}
-		/* wait for 1ms */
-		usleep_range(1000, 1500);
-	}
-out:
-	return rc;
 }
 
-static int msmsdcc_execute_tuning(struct mmc_host *mmc)
+/* Initialize the DLL (Programmable Delay Line ) */
+static int msmsdcc_init_cm_sdc4_dll(struct msmsdcc_host *host)
 {
-	struct msmsdcc_host *host = mmc_priv(mmc);
-	u8 phase;
-	u8 *data_buf;
-	u8 tuned_phases[16], tuned_phase_cnt = 0;
 	int rc = 0;
+	unsigned long flags;
+	u32 wait_cnt;
 
-	/* Tuning is only required for SDR50 & SDR104 modes */
-	if (!host->tuning_needed) {
-		rc = 0;
-		goto out;
-	}
-
-	host->cmd19_tuning_in_progress = 1;
+	spin_lock_irqsave(&host->lock, flags);
 	/*
 	 * Make sure that clock is always enabled when DLL
 	 * tuning is in progress. Keeping PWRSAVE ON may
@@ -2683,6 +2905,288 @@ static int msmsdcc_execute_tuning(struct mmc_host *mmc)
 	 */
 	writel_relaxed((readl_relaxed(host->base + MMCICLOCK)
 			& ~MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
+
+	/* Write 1 to DLL_RST bit of MCI_DLL_CONFIG register */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_DLL_RST), host->base + MCI_DLL_CONFIG);
+
+	/* Write 1 to DLL_PDN bit of MCI_DLL_CONFIG register */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_DLL_PDN), host->base + MCI_DLL_CONFIG);
+
+	msmsdcc_cm_sdc4_dll_set_freq(host);
+
+	/* Write 0 to DLL_RST bit of MCI_DLL_CONFIG register */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			& ~MCI_DLL_RST), host->base + MCI_DLL_CONFIG);
+
+	/* Write 0 to DLL_PDN bit of MCI_DLL_CONFIG register */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			& ~MCI_DLL_PDN), host->base + MCI_DLL_CONFIG);
+
+	/* Set DLL_EN bit to 1. */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_DLL_EN), host->base + MCI_DLL_CONFIG);
+
+	/* Set CK_OUT_EN bit to 1. */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
+
+	wait_cnt = 50;
+	/* Wait until DLL_LOCK bit of MCI_DLL_STATUS register becomes '1' */
+	while (!(readl_relaxed(host->base + MCI_DLL_STATUS) & MCI_DLL_LOCK)) {
+		/* max. wait for 50us sec for LOCK bit to be set */
+		if (--wait_cnt == 0) {
+			pr_err("%s: %s: DLL failed to LOCK\n",
+				mmc_hostname(host->mmc), __func__);
+			rc = -ETIMEDOUT;
+			goto out;
+		}
+		/* wait for 1us before polling again */
+		udelay(1);
+	}
+
+out:
+	/* re-enable PWRSAVE */
+	writel_relaxed((readl_relaxed(host->base + MMCICLOCK) |
+			MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	return rc;
+}
+
+static inline int msmsdcc_dll_poll_ck_out_en(struct msmsdcc_host *host,
+						u8 poll)
+{
+	int rc = 0;
+	u32 wait_cnt = 50;
+	u8 ck_out_en = 0;
+
+	/* poll for MCI_CK_OUT_EN bit.  max. poll time = 50us */
+	ck_out_en = !!(readl_relaxed(host->base + MCI_DLL_CONFIG) &
+			MCI_CK_OUT_EN);
+
+	while (ck_out_en != poll) {
+		if (--wait_cnt == 0) {
+			pr_err("%s: %s: CK_OUT_EN bit is not %d\n",
+				mmc_hostname(host->mmc), __func__, poll);
+			rc = -ETIMEDOUT;
+			goto out;
+		}
+		udelay(1);
+
+		ck_out_en = !!(readl_relaxed(host->base + MCI_DLL_CONFIG) &
+			MCI_CK_OUT_EN);
+	}
+out:
+	return rc;
+}
+
+/*
+ * Enable a CDR circuit in CM_SDC4_DLL block to enable automatic
+ * calibration sequence. This function should be called before
+ * enabling AUTO_CMD19 bit in MCI_CMD register for block read
+ * commands (CMD17/CMD18).
+ *
+ * This function gets called when host spinlock acquired.
+ */
+static int msmsdcc_enable_cdr_cm_sdc4_dll(struct msmsdcc_host *host)
+{
+	int rc = 0;
+	u32 config;
+
+	config = readl_relaxed(host->base + MCI_DLL_CONFIG);
+	config |= MCI_CDR_EN;
+	config &= ~(MCI_CDR_EXT_EN | MCI_CK_OUT_EN);
+	writel_relaxed(config, host->base + MCI_DLL_CONFIG);
+
+	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '0' */
+	rc = msmsdcc_dll_poll_ck_out_en(host, 0);
+	if (rc)
+		goto err_out;
+
+	/* Set CK_OUT_EN bit of MCI_DLL_CONFIG register to 1. */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
+
+	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '1' */
+	rc = msmsdcc_dll_poll_ck_out_en(host, 1);
+	if (rc)
+		goto err_out;
+
+	goto out;
+
+err_out:
+	pr_err("%s: %s: Failed\n", mmc_hostname(host->mmc), __func__);
+out:
+	return rc;
+}
+
+static int msmsdcc_config_cm_sdc4_dll_phase(struct msmsdcc_host *host,
+						u8 phase)
+{
+	int rc = 0;
+	u8 grey_coded_phase_table[] = {0x0, 0x1, 0x3, 0x2, 0x6, 0x7, 0x5, 0x4,
+					0xC, 0xD, 0xF, 0xE, 0xA, 0xB, 0x9,
+					0x8};
+	unsigned long flags;
+	u32 config;
+
+	spin_lock_irqsave(&host->lock, flags);
+
+	config = readl_relaxed(host->base + MCI_DLL_CONFIG);
+	config &= ~(MCI_CDR_EN | MCI_CK_OUT_EN);
+	config |= (MCI_CDR_EXT_EN | MCI_DLL_EN);
+	writel_relaxed(config, host->base + MCI_DLL_CONFIG);
+
+	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '0' */
+	rc = msmsdcc_dll_poll_ck_out_en(host, 0);
+	if (rc)
+		goto err_out;
+
+	/*
+	 * Write the selected DLL clock output phase (0 ... 15)
+	 * to CDR_SELEXT bit field of MCI_DLL_CONFIG register.
+	 */
+	writel_relaxed(((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			& ~(0xF << 20))
+			| (grey_coded_phase_table[phase] << 20)),
+			host->base + MCI_DLL_CONFIG);
+
+	/* Set CK_OUT_EN bit of MCI_DLL_CONFIG register to 1. */
+	writel_relaxed((readl_relaxed(host->base + MCI_DLL_CONFIG)
+			| MCI_CK_OUT_EN), host->base + MCI_DLL_CONFIG);
+
+	/* Wait until CK_OUT_EN bit of MCI_DLL_CONFIG register becomes '1' */
+	rc = msmsdcc_dll_poll_ck_out_en(host, 1);
+	if (rc)
+		goto err_out;
+
+	config = readl_relaxed(host->base + MCI_DLL_CONFIG);
+	config |= MCI_CDR_EN;
+	config &= ~MCI_CDR_EXT_EN;
+	writel_relaxed(config, host->base + MCI_DLL_CONFIG);
+	goto out;
+
+err_out:
+	pr_err("%s: %s: Failed to set DLL phase: %d\n",
+		mmc_hostname(host->mmc), __func__, phase);
+out:
+	spin_unlock_irqrestore(&host->lock, flags);
+	return rc;
+}
+
+/*
+ * Find out the greatest range of consecuitive selected
+ * DLL clock output phases that can be used as sampling
+ * setting for SD3.0 UHS-I card read operation (in SDR104
+ * timing mode) or for eMMC4.5 card read operation (in HS200
+ * timing mode).
+ * Select the 3/4 of the range and configure the DLL with the
+ * selected DLL clock output phase.
+*/
+static int find_most_appropriate_phase(struct msmsdcc_host *host,
+				u8 *phase_table, u8 total_phases)
+{
+	int ret;
+	u8 ranges[16][16] = { {0}, {0} };
+	u8 phases_per_row[16] = {0};
+	int row_index = 0, col_index = 0, selected_row_index = 0, curr_max = 0;
+	int i, cnt, phase_0_raw_index = 0, phase_15_raw_index = 0;
+	bool phase_0_found = false, phase_15_found = false;
+
+	if (total_phases > 16) {
+		pr_err("%s: %s: invalid argument: total_phases=%d\n",
+			mmc_hostname(host->mmc), __func__, total_phases);
+		return -EINVAL;
+	}
+
+	for (cnt = 0; cnt < total_phases; cnt++) {
+		ranges[row_index][col_index] = phase_table[cnt];
+		phases_per_row[row_index] += 1;
+		col_index++;
+
+		if ((cnt + 1) == total_phases) {
+			continue;
+		/* check if next phase in phase_table is consecutive or not */
+		} else if ((phase_table[cnt] + 1) != phase_table[cnt + 1]) {
+			row_index++;
+			col_index = 0;
+		}
+	}
+
+	/* Check if phase-0 is present in first valid window? */
+	if (!ranges[0][0]) {
+		phase_0_found = true;
+		phase_0_raw_index = 0;
+		/* Check if cycle exist between 2 valid windows */
+		for (cnt = 1; cnt <= row_index; cnt++) {
+			if (phases_per_row[cnt]) {
+				for (i = 0; i <= phases_per_row[cnt]; i++) {
+					if (ranges[cnt][i] == 15) {
+						phase_15_found = true;
+						phase_15_raw_index = cnt;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	/* If 2 valid windows form cycle then merge them as single window */
+	if (phase_0_found && phase_15_found) {
+		/* number of phases in raw where phase 0 is present */
+		u8 phases_0 = phases_per_row[phase_0_raw_index];
+		/* number of phases in raw where phase 15 is present */
+		u8 phases_15 = phases_per_row[phase_15_raw_index];
+
+		cnt = 0;
+		for (i = phases_15; i < (phases_15 + phases_0); i++) {
+			ranges[phase_15_raw_index][i] =
+				ranges[phase_0_raw_index][cnt];
+			cnt++;
+		}
+		phases_per_row[phase_0_raw_index] = 0;
+		phases_per_row[phase_15_raw_index] = phases_15 + phases_0;
+	}
+
+	for (cnt = 0; cnt <= row_index; cnt++) {
+		if (phases_per_row[cnt] > curr_max) {
+			curr_max = phases_per_row[cnt];
+			selected_row_index = cnt;
+		}
+	}
+
+	i = ((curr_max * 3) / 4) - 1;
+	ret = (int)ranges[selected_row_index][i];
+
+	return ret;
+}
+
+static int msmsdcc_execute_tuning(struct mmc_host *mmc)
+{
+	int rc = 0;
+	struct msmsdcc_host *host = mmc_priv(mmc);
+	unsigned long	flags;
+	u8 phase, *data_buf, tuned_phases[16], tuned_phase_cnt = 0;
+
+	pr_debug("%s: Enter %s\n", mmc_hostname(mmc), __func__);
+
+	/* Tuning is only required for SDR104 modes */
+	if (!host->tuning_needed) {
+		rc = 0;
+		goto exit;
+	}
+
+	spin_lock_irqsave(&host->lock, flags);
+	WARN(!host->pwr, "SDCC power is turned off\n");
+	WARN(!host->clks_on, "SDCC clocks are turned off\n");
+	WARN(host->sdcc_irq_disabled, "SDCC IRQ is disabled\n");
+
+	host->cmd19_tuning_in_progress = 1;
+	msmsdcc_delay(host);
+	spin_unlock_irqrestore(&host->lock, flags);
+
 	/* first of all reset the tuning block */
 	rc = msmsdcc_init_cm_sdc4_dll(host);
 	if (rc)
@@ -2727,37 +3231,45 @@ static int msmsdcc_execute_tuning(struct mmc_host *mmc)
 			!memcmp(data_buf, cmd19_tuning_block, 64)) {
 			/* tuning is successful with this tuning point */
 			tuned_phases[tuned_phase_cnt++] = phase;
+			pr_debug("%s: %s: found good phase = %d\n",
+				mmc_hostname(mmc), __func__, phase);
 		}
 	} while (++phase < 16);
 
-	kfree(data_buf);
-
 	if (tuned_phase_cnt) {
-		tuned_phase_cnt--;
-		tuned_phase_cnt = (tuned_phase_cnt * 3) / 4;
-		phase = tuned_phases[tuned_phase_cnt];
+		rc = find_most_appropriate_phase(host, tuned_phases,
+							tuned_phase_cnt);
+		if (rc < 0)
+			goto kfree;
+		else
+			phase = (u8)rc;
+
 		/*
 		 * Finally set the selected phase in delay
 		 * line hw block.
 		 */
 		rc = msmsdcc_config_cm_sdc4_dll_phase(host, phase);
 		if (rc)
-			goto out;
+			goto kfree;
+		pr_debug("%s: %s: finally setting the tuning phase to %d\n",
+				mmc_hostname(mmc), __func__, phase);
 	} else {
 		/* tuning failed */
-		rc = -EAGAIN;
-		pr_err("%s: %s: no tuning point found",
+		pr_err("%s: %s: no tuning point found\n",
 			mmc_hostname(mmc), __func__);
+		msmsdcc_dump_sdcc_state(host);
+		rc = -EAGAIN;
 	}
-	goto out;
 
 kfree:
 	kfree(data_buf);
 out:
-	/* re-enable PWESAVE */
-	writel_relaxed((readl_relaxed(host->base + MMCICLOCK) |
-			MCI_CLK_PWRSAVE), host->base + MMCICLOCK);
+	spin_lock_irqsave(&host->lock, flags);
+	msmsdcc_delay(host);
 	host->cmd19_tuning_in_progress = 0;
+	spin_unlock_irqrestore(&host->lock, flags);
+exit:
+	pr_debug("%s: Exit %s\n", mmc_hostname(mmc), __func__);
 	return rc;
 }
 
@@ -2786,8 +3298,11 @@ msmsdcc_slot_status(struct msmsdcc_host *host)
 			mmc_hostname(host->mmc), __func__, gpio_no);
 	} else {
 		status = gpio_direction_input(gpio_no);
-		if (!status)
-			status = !gpio_get_value_cansleep(gpio_no);
+		if (!status) {
+			status = gpio_get_value_cansleep(gpio_no);
+			if (host->plat->is_status_gpio_active_low)
+				status = !status;
+		}
 		gpio_free(gpio_no);
 	}
 	return status;
@@ -2806,9 +3321,25 @@ msmsdcc_check_status(unsigned long data)
 			status = msmsdcc_slot_status(host);
 
 		host->eject = !status;
+
 		if (status ^ host->oldstat) {
-			pr_info("%s: Slot status change detected (%d -> %d)\n",
-			       mmc_hostname(host->mmc), host->oldstat, status);
+			if (host->plat->status)
+				pr_info("%s: Slot status change detected "
+					"(%d -> %d)\n",
+					mmc_hostname(host->mmc),
+					host->oldstat, status);
+			else if (host->plat->is_status_gpio_active_low)
+				pr_info("%s: Slot status change detected "
+					"(%d -> %d) and the card detect GPIO"
+					" is ACTIVE_LOW\n",
+					mmc_hostname(host->mmc),
+					host->oldstat, status);
+			else
+				pr_info("%s: Slot status change detected "
+					"(%d -> %d) and the card detect GPIO"
+					" is ACTIVE_HIGH\n",
+					mmc_hostname(host->mmc),
+					host->oldstat, status);
 			mmc_detect_change(host->mmc, 0);
 		}
 		host->oldstat = status;
@@ -2984,17 +3515,10 @@ static int msmsdcc_sps_init_ep_conn(struct msmsdcc_host *host,
 	 * transfer. It's ignored for BAM-to-System mode transfer.
 	 */
 	sps_config->event_thresh = 0x10;
-	/*
-	 * Max. no of scatter/gather buffers that can
-	 * be passed by block layer = 32 (NR_SG).
-	 * Each BAM descritor needs 64 bits (8 bytes).
-	 * One BAM descriptor is required per buffer transfer.
-	 * So we would require total 256 (32 * 8) bytes of descriptor FIFO.
-	 * But due to HW limitation we need to allocate atleast one extra
-	 * descriptor memory (256 bytes + 8 bytes). But in order to be
-	 * in power of 2, we are allocating 512 bytes of memory.
-	 */
-	sps_config->desc.size = 512;
+
+	/* Allocate maximum descriptor fifo size */
+	sps_config->desc.size = SPS_MAX_DESC_FIFO_SIZE -
+		(SPS_MAX_DESC_FIFO_SIZE % SPS_MAX_DESC_LENGTH);
 	sps_config->desc.base = dma_alloc_coherent(mmc_dev(host->mmc),
 						sps_config->desc.size,
 						&sps_config->desc.phys_base,
@@ -3463,10 +3987,8 @@ static void msmsdcc_req_tout_timer_hdlr(unsigned long data)
 					msmsdcc_request_end(host, mrq);
 			}
 		} else {
-			if (host->prog_enable) {
-				host->prog_scan = 0;
-				host->prog_enable = 0;
-			}
+			host->prog_enable = 0;
+			host->curr.wait_for_auto_prog_done = 0;
 			msmsdcc_reset_and_restore(host);
 			msmsdcc_request_end(host, mrq);
 		}
@@ -3474,10 +3996,112 @@ static void msmsdcc_req_tout_timer_hdlr(unsigned long data)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+static struct mmc_platform_data *msmsdcc_populate_pdata(struct device *dev)
+{
+	int i, ret;
+	struct mmc_platform_data *pdata;
+	struct device_node *np = dev->of_node;
+	u32 bus_width = 0;
+	u32 *clk_table;
+	int clk_table_len;
+	u32 *sup_voltages;
+	int sup_volt_len;
+
+	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+	if (!pdata) {
+		dev_err(dev, "could not allocate memory for platform data\n");
+		goto err;
+	}
+
+	of_property_read_u32(np, "qcom,sdcc-bus-width", &bus_width);
+	if (bus_width == 8) {
+		pdata->mmc_bus_width = MMC_CAP_8_BIT_DATA;
+	} else if (bus_width == 4) {
+		pdata->mmc_bus_width = MMC_CAP_4_BIT_DATA;
+	} else {
+		dev_notice(dev, "Invalid bus width, default to 1 bit mode\n");
+		pdata->mmc_bus_width = 0;
+	}
+
+	if (of_get_property(np, "qcom,sdcc-sup-voltages", &sup_volt_len)) {
+		size_t sz;
+		sz = sup_volt_len / sizeof(*sup_voltages);
+		if (sz > 0) {
+			sup_voltages = devm_kzalloc(dev,
+					sz * sizeof(*sup_voltages), GFP_KERNEL);
+			if (!sup_voltages) {
+				dev_err(dev, "No memory for supported voltage\n");
+				goto err;
+			}
+
+			ret = of_property_read_u32_array(np,
+				"qcom,sdcc-sup-voltages", sup_voltages, sz);
+			if (ret < 0) {
+				dev_err(dev, "error while reading voltage"
+						"ranges %d\n", ret);
+				goto err;
+			}
+		} else {
+			dev_err(dev, "No supported voltages\n");
+			goto err;
+		}
+		for (i = 0; i < sz; i += 2) {
+			u32 mask;
+
+			mask = mmc_vddrange_to_ocrmask(sup_voltages[i],
+					sup_voltages[i + 1]);
+			if (!mask)
+				dev_err(dev, "Invalide voltage range %d\n", i);
+			pdata->ocr_mask |= mask;
+		}
+		dev_dbg(dev, "OCR mask=0x%x\n", pdata->ocr_mask);
+	} else {
+		dev_err(dev, "Supported voltage range not specified\n");
+	}
+
+	if (of_get_property(np, "qcom,sdcc-clk-rates", &clk_table_len)) {
+		size_t sz;
+		sz = clk_table_len / sizeof(*clk_table);
+
+		if (sz > 0) {
+			clk_table = devm_kzalloc(dev, sz * sizeof(*clk_table),
+					GFP_KERNEL);
+			if (!clk_table) {
+				dev_err(dev, "No memory for clock table\n");
+				goto err;
+			}
+
+			ret = of_property_read_u32_array(np,
+				"qcom,sdcc-clk-rates", clk_table, sz);
+			if (ret < 0) {
+				dev_err(dev, "error while reading clk"
+						"table %d\n", ret);
+				goto err;
+			}
+		} else {
+			dev_err(dev, "clk_table not specified\n");
+			goto err;
+		}
+		pdata->sup_clk_table = clk_table;
+		pdata->sup_clk_cnt = sz;
+	} else {
+		dev_err(dev, "Supported clock rates not specified\n");
+	}
+
+	if (of_get_property(np, "qcom,sdcc-nonremovable", NULL))
+		pdata->nonremovable = true;
+	if (of_get_property(np, "qcom,sdcc-disable_cmd23", NULL))
+		pdata->disable_cmd23 = true;
+
+	return pdata;
+err:
+	return NULL;
+}
+
 static int
 msmsdcc_probe(struct platform_device *pdev)
 {
-	struct mmc_platform_data *plat = pdev->dev.platform_data;
+	struct mmc_platform_data *plat;
 	struct msmsdcc_host *host;
 	struct mmc_host *mmc;
 	unsigned long flags;
@@ -3491,6 +4115,14 @@ msmsdcc_probe(struct platform_device *pdev)
 	int ret = 0;
 	int i;
 
+	if (pdev->dev.of_node) {
+		plat = msmsdcc_populate_pdata(&pdev->dev);
+		of_property_read_u32((&pdev->dev)->of_node,
+				"cell-index", &pdev->id);
+	} else {
+		plat = pdev->dev.platform_data;
+	}
+
 	/* must have platform data */
 	if (!plat) {
 		pr_err("%s: Platform data not available\n", __func__);
@@ -3501,43 +4133,63 @@ msmsdcc_probe(struct platform_device *pdev)
 	if (pdev->id < 1 || pdev->id > 5)
 		return -EINVAL;
 
-	if (plat->is_sdio_al_client)
-		if (!plat->sdio_lpm_gpio_setup || !plat->sdiowakeup_irq)
-			return -EINVAL;
+	if (plat->is_sdio_al_client && !plat->sdiowakeup_irq) {
+		pr_err("%s: No wakeup IRQ for sdio_al client\n", __func__);
+		return -EINVAL;
+	}
 
 	if (pdev->resource == NULL || pdev->num_resources < 2) {
 		pr_err("%s: Invalid resource\n", __func__);
 		return -ENXIO;
 	}
+	if (pdev->dev.of_node) {
+		/*
+		 * Device tree iomem resources are only accessible by index.
+		 * index = 0 -> SDCC register interface
+		 * index = 1 -> DML register interface
+		 * index = 2 -> BAM register interface
+		 * IRQ resources:
+		 * index = 0 -> SDCC IRQ
+		 * index = 1 -> BAM IRQ
+		 */
+		core_memres = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+		dml_memres = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		bam_memres = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+		core_irqres = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+		bam_irqres = platform_get_resource(pdev, IORESOURCE_IRQ, 1);
+	} else {
+		for (i = 0; i < pdev->num_resources; i++) {
+			if (pdev->resource[i].flags & IORESOURCE_MEM) {
+				if (!strncmp(pdev->resource[i].name,
+						"sdcc_dml_addr",
+						sizeof("sdcc_dml_addr")))
+					dml_memres = &pdev->resource[i];
+				else if (!strncmp(pdev->resource[i].name,
+						"sdcc_bam_addr",
+						sizeof("sdcc_bam_addr")))
+					bam_memres = &pdev->resource[i];
+				else
+					core_memres = &pdev->resource[i];
 
-	for (i = 0; i < pdev->num_resources; i++) {
-		if (pdev->resource[i].flags & IORESOURCE_MEM) {
-			if (!strcmp(pdev->resource[i].name,
-					"sdcc_dml_addr"))
-				dml_memres = &pdev->resource[i];
-			else if (!strcmp(pdev->resource[i].name,
-					"sdcc_bam_addr"))
-				bam_memres = &pdev->resource[i];
-			else
-				core_memres = &pdev->resource[i];
-
-		}
-		if (pdev->resource[i].flags & IORESOURCE_IRQ) {
-			if (!strcmp(pdev->resource[i].name,
-					"sdcc_bam_irq"))
-				bam_irqres = &pdev->resource[i];
-			else
-				core_irqres = &pdev->resource[i];
-		}
-		if (pdev->resource[i].flags & IORESOURCE_DMA) {
-			if (!strncmp(pdev->resource[i].name,
-					"sdcc_dma_chnl",
-					sizeof("sdcc_dma_chnl")))
-				dmares = &pdev->resource[i];
-			else if (!strncmp(pdev->resource[i].name,
-					"sdcc_dma_crci",
-					sizeof("sdcc_dma_crci")))
-				dma_crci_res = &pdev->resource[i];
+			}
+			if (pdev->resource[i].flags & IORESOURCE_IRQ) {
+				if (!strncmp(pdev->resource[i].name,
+						"sdcc_bam_irq",
+						sizeof("sdcc_bam_irq")))
+					bam_irqres = &pdev->resource[i];
+				else
+					core_irqres = &pdev->resource[i];
+			}
+			if (pdev->resource[i].flags & IORESOURCE_DMA) {
+				if (!strncmp(pdev->resource[i].name,
+						"sdcc_dma_chnl",
+						sizeof("sdcc_dma_chnl")))
+					dmares = &pdev->resource[i];
+				else if (!strncmp(pdev->resource[i].name,
+						"sdcc_dma_crci",
+						sizeof("sdcc_dma_crci")))
+					dma_crci_res = &pdev->resource[i];
+			}
 		}
 	}
 
@@ -3669,6 +4321,14 @@ msmsdcc_probe(struct platform_device *pdev)
 	host->clk_rate = clk_get_rate(host->clk);
 	if (!host->clk_rate)
 		dev_err(&pdev->dev, "Failed to read MCLK\n");
+
+	/*
+	* Lookup the Controller Version, to identify the supported features
+	* Version number read as 0 would indicate SDCC3 or earlier versions
+	*/
+	host->sdcc_version = readl_relaxed(host->base + MCI_VERSION);
+	pr_info("%s: mci-version: %x\n", mmc_hostname(host->mmc),
+		host->sdcc_version);
 	/*
 	 * Set the register write delay according to min. clock frequency
 	 * supported and update later when the host->clk_rate changes.
@@ -3678,6 +4338,13 @@ msmsdcc_probe(struct platform_device *pdev)
 		      msmsdcc_get_min_sup_clk_rate(host)));
 
 	host->clks_on = 1;
+	/* Apply Hard reset to SDCC to put it in power on default state */
+	msmsdcc_hard_reset(host);
+
+	/* pm qos request to prevent apps idle power collapse */
+	if (host->plat->swfi_latency)
+		pm_qos_add_request(&host->pm_qos_req_dma,
+			PM_QOS_CPU_DMA_LATENCY, PM_QOS_DEFAULT_VALUE);
 
 	ret = msmsdcc_vreg_init(host, true);
 	if (ret) {
@@ -3697,6 +4364,7 @@ msmsdcc_probe(struct platform_device *pdev)
 		if (ret)
 			goto sps_exit;
 	}
+	mmc_dev(mmc)->dma_mask = &dma_mask;
 
 	/*
 	 * Setup MMC host structure
@@ -3709,6 +4377,7 @@ msmsdcc_probe(struct platform_device *pdev)
 	mmc->caps |= plat->mmc_bus_width;
 
 	mmc->caps |= MMC_CAP_MMC_HIGHSPEED | MMC_CAP_SD_HIGHSPEED;
+	mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY;
 
 	/*
 	 * If we send the CMD23 before multi block write/read command
@@ -3717,7 +4386,7 @@ msmsdcc_probe(struct platform_device *pdev)
 	 * status is to use the AUTO_PROG_DONE status provided by SDCC4
 	 * controller. So let's enable the CMD23 for SDCC4 only.
 	 */
-	if (!plat->disable_cmd23 && host->plat->sdcc_v4_sup)
+	if (!plat->disable_cmd23 && host->sdcc_version)
 		mmc->caps |= MMC_CAP_CMD23;
 
 	mmc->caps |= plat->uhs_caps;
@@ -3739,18 +4408,16 @@ msmsdcc_probe(struct platform_device *pdev)
 	if (plat->is_sdio_al_client)
 		mmc->pm_flags |= MMC_PM_IGNORE_PM_NOTIFY;
 
-	mmc->max_segs = NR_SG;
-	mmc->max_blk_size = 4096;	/* MCI_DATA_CTL BLOCKSIZE up to 4096 */
-	mmc->max_blk_count = 65535;
+	mmc->max_segs = msmsdcc_get_nr_sg(host);
+	mmc->max_blk_size = MMC_MAX_BLK_SIZE;
+	mmc->max_blk_count = MMC_MAX_BLK_CNT;
 
-	mmc->max_req_size = 33554432;	/* MCI_DATA_LENGTH is 25 bits */
+	mmc->max_req_size = MMC_MAX_REQ_SIZE;
 	mmc->max_seg_size = mmc->max_req_size;
 
 	writel_relaxed(0, host->base + MMCIMASK0);
 	writel_relaxed(MCI_CLEAR_STATIC_MASK, host->base + MMCICLEAR);
 
-	/* Delay needed (MMCIMASK0 was just written above) */
-	msmsdcc_delay(host);
 	writel_relaxed(MCI_IRQENABLE, host->base + MMCIMASK0);
 	mb();
 	host->mci_irqenable = MCI_IRQENABLE;
@@ -3813,6 +4480,7 @@ msmsdcc_probe(struct platform_device *pdev)
 			host->oldstat = plat->status(mmc_dev(host->mmc));
 		else
 			host->oldstat = msmsdcc_slot_status(host);
+
 		host->eject = !host->oldstat;
 	}
 
@@ -3868,6 +4536,9 @@ msmsdcc_probe(struct platform_device *pdev)
 		mmc->caps |= MMC_CAP_DISABLE;
 		pm_runtime_enable(&(pdev)->dev);
 	}
+#endif
+#ifndef CONFIG_PM_RUNTIME
+	mmc_set_disable_delay(mmc, MSM_MMC_DISABLE_TIMEOUT);
 #endif
 	setup_timer(&host->req_tout_timer, msmsdcc_req_tout_timer_hdlr,
 			(unsigned long)host);
@@ -3952,6 +4623,8 @@ msmsdcc_probe(struct platform_device *pdev)
 	msmsdcc_vreg_init(host, false);
  clk_disable:
 	clk_disable(host->clk);
+	if (host->plat->swfi_latency)
+		pm_qos_remove_request(&host->pm_qos_req_dma);
  clk_put:
 	clk_put(host->clk);
  pclk_disable:
@@ -4024,6 +4697,9 @@ static int msmsdcc_remove(struct platform_device *pdev)
 	if (!IS_ERR_OR_NULL(host->dfab_pclk))
 		clk_put(host->dfab_pclk);
 
+	if (host->plat->swfi_latency)
+		pm_qos_remove_request(&host->pm_qos_req_dma);
+
 	msmsdcc_vreg_init(host, false);
 
 	if (host->is_dma_mode) {
@@ -4072,7 +4748,8 @@ int msmsdcc_sdio_al_lpm(struct mmc_host *mmc, bool enable)
 			host->clks_on = 0;
 		}
 
-		if (!host->sdio_gpio_lpm) {
+		if (host->plat->sdio_lpm_gpio_setup &&
+				!host->sdio_gpio_lpm) {
 			spin_unlock_irqrestore(&host->lock, flags);
 			host->plat->sdio_lpm_gpio_setup(mmc_dev(mmc), 0);
 			spin_lock_irqsave(&host->lock, flags);
@@ -4091,7 +4768,8 @@ int msmsdcc_sdio_al_lpm(struct mmc_host *mmc, bool enable)
 			msmsdcc_disable_irq_wake(host);
 		}
 
-		if (host->sdio_gpio_lpm) {
+		if (host->plat->sdio_lpm_gpio_setup &&
+				host->sdio_gpio_lpm) {
 			spin_unlock_irqrestore(&host->lock, flags);
 			host->plat->sdio_lpm_gpio_setup(mmc_dev(mmc), 1);
 			spin_lock_irqsave(&host->lock, flags);
@@ -4110,7 +4788,6 @@ int msmsdcc_sdio_al_lpm(struct mmc_host *mmc, bool enable)
 			enable_irq(host->core_irqres->start);
 			host->sdcc_irq_disabled = 0;
 		}
-		wake_lock_timeout(&host->sdio_wlock, 1);
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 	return 0;
@@ -4132,7 +4809,6 @@ msmsdcc_runtime_suspend(struct device *dev)
 
 	if (host->plat->is_sdio_al_client)
 		return 0;
-
 	pr_debug("%s: %s: start\n", mmc_hostname(mmc), __func__);
 	if (mmc) {
 		host->sdcc_suspending = 1;
@@ -4143,12 +4819,14 @@ msmsdcc_runtime_suspend(struct device *dev)
 		 * part of LPM), then clocks should be turned on before
 		 * calling mmc_suspend_host() because mmc_suspend_host might
 		 * send some commands to the card. The clocks will be turned
-		 * off again after mmc_suspend_host. Thus for SD/MMC/SDIO
+		 * off again after mmc_suspend_host. Thus for SDIO
 		 * cards, clocks will be turned on before mmc_suspend_host
 		 * and turned off after mmc_suspend_host.
 		 */
-		mmc->ios.clock = host->clk_rate;
-		mmc->ops->set_ios(host->mmc, &host->mmc->ios);
+		if (mmc->card && mmc_card_sdio(mmc->card)) {
+			mmc->ios.clock = host->clk_rate;
+			mmc->ops->set_ios(host->mmc, &host->mmc->ios);
+		}
 
 		/*
 		 * MMC core thinks that host is disabled by now since
@@ -4165,7 +4843,11 @@ msmsdcc_runtime_suspend(struct device *dev)
 		 * simple become pm usage counter increment operations.
 		 */
 		pm_runtime_get_noresume(dev);
-		rc = mmc_suspend_host(mmc);
+		/* If there is pending detect work abort runtime suspend */
+		if (unlikely(work_busy(&mmc->detect.work)))
+			rc = -EAGAIN;
+		else
+			rc = mmc_suspend_host(mmc);
 		pm_runtime_put_noidle(dev);
 
 		if (!rc) {
@@ -4196,7 +4878,7 @@ msmsdcc_runtime_suspend(struct device *dev)
 		if (rc && wake_lock_active(&host->sdio_suspend_wlock))
 			wake_unlock(&host->sdio_suspend_wlock);
 	}
-	pr_debug("%s: %s: end\n", mmc_hostname(mmc), __func__);
+	pr_debug("%s: %s: ends with err=%d\n", mmc_hostname(mmc), __func__, rc);
 	return rc;
 }
 
@@ -4217,26 +4899,26 @@ msmsdcc_runtime_resume(struct device *dev)
 				enable_irq(host->core_irqres->start);
 				host->sdcc_irq_disabled = 0;
 			}
-		}
-		mmc->ios.clock = host->clk_rate;
-		mmc->ops->set_ios(host->mmc, &host->mmc->ios);
+			mmc->ios.clock = host->clk_rate;
+			mmc->ops->set_ios(host->mmc, &host->mmc->ios);
 
-		spin_lock_irqsave(&host->lock, flags);
-		writel_relaxed(host->mci_irqenable, host->base + MMCIMASK0);
-		mb();
+			spin_lock_irqsave(&host->lock, flags);
+			writel_relaxed(host->mci_irqenable,
+					host->base + MMCIMASK0);
+			mb();
 
-		if (mmc->card && (mmc->card->type == MMC_TYPE_SDIO) &&
-				(mmc->pm_flags & MMC_PM_WAKE_SDIO_IRQ) &&
-				!host->sdio_irq_disabled) {
+			if ((mmc->pm_flags & MMC_PM_WAKE_SDIO_IRQ) &&
+					!host->sdio_irq_disabled) {
 				if (host->plat->sdiowakeup_irq) {
 					disable_irq_nosync(
 						host->plat->sdiowakeup_irq);
 					msmsdcc_disable_irq_wake(host);
 					host->sdio_irq_disabled = 1;
 				}
-		}
+			}
 
-		spin_unlock_irqrestore(&host->lock, flags);
+			spin_unlock_irqrestore(&host->lock, flags);
+		}
 
 		mmc_resume_host(mmc);
 
@@ -4333,12 +5015,19 @@ static const struct dev_pm_ops msmsdcc_dev_pm_ops = {
 	.resume		 = msmsdcc_pm_resume,
 };
 
+static const struct of_device_id msmsdcc_dt_match[] = {
+	{.compatible = "qcom,msm-sdcc"},
+
+};
+MODULE_DEVICE_TABLE(of, msmsdcc_dt_match);
+
 static struct platform_driver msmsdcc_driver = {
 	.probe		= msmsdcc_probe,
 	.remove		= msmsdcc_remove,
 	.driver		= {
 		.name	= "msm_sdcc",
 		.pm	= &msmsdcc_dev_pm_ops,
+		.of_match_table = msmsdcc_dt_match,
 	},
 };
 
@@ -4385,7 +5074,7 @@ msmsdcc_dbg_state_read(struct file *file, char __user *ubuf,
 		       size_t count, loff_t *ppos)
 {
 	struct msmsdcc_host *host = (struct msmsdcc_host *) file->private_data;
-	char buf[1024];
+	char buf[200];
 	int max, i;
 
 	i = 0;

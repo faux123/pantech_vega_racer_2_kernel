@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2008 Google, Inc.
- * Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -20,6 +20,7 @@
 #include <linux/msm_kgsl.h>
 #include <linux/android_pmem.h>
 #include <linux/regulator/machine.h>
+#include <linux/init.h>
 #include <mach/irqs.h>
 #include <mach/msm_iomap.h>
 #include <mach/dma.h>
@@ -548,8 +549,8 @@ static struct resource resources_otg[] = {
 	},
 	{
 		.name	= "vbus_on",
-		.start	= PM8058_CHGVAL_IRQ(PMIC8058_IRQ_BASE),
-		.end	= PM8058_CHGVAL_IRQ(PMIC8058_IRQ_BASE),
+		.start	= PMIC8058_IRQ_BASE + PM8058_CHGVAL_IRQ,
+		.end	= PMIC8058_IRQ_BASE + PM8058_CHGVAL_IRQ,
 		.flags	= IORESOURCE_IRQ,
 	},
 };
@@ -789,7 +790,9 @@ static struct resource msm_vidc_720p_resources[] = {
 };
 
 struct msm_vidc_platform_data vidc_platform_data = {
-	.memtype = MEMTYPE_EBI0
+	.memtype = MEMTYPE_EBI0,
+	.enable_ion = 0,
+	.disable_dmx = 0
 };
 
 struct platform_device msm_device_vidc_720p = {
@@ -1101,37 +1104,28 @@ struct resource kgsl_3d0_resources[] = {
 };
 
 static struct kgsl_device_platform_data kgsl_3d0_pdata = {
-	.pwr_data = {
-		.pwrlevel = {
-			{
-				.gpu_freq = 245760000,
-				.bus_freq = 192000000,
-			},
-			{
-				.gpu_freq = 192000000,
-				.bus_freq = 152000000,
-			},
-			{
-				.gpu_freq = 192000000,
-				.bus_freq = 0,
-			},
+	.pwrlevel = {
+		{
+			.gpu_freq = 245760000,
+			.bus_freq = 192000000,
 		},
-		.init_level = 0,
-		.num_levels = 3,
-		.set_grp_async = set_grp3d_async,
-		.idle_timeout = HZ/20,
-		.nap_allowed = true,
-	},
-	.clk = {
-		.name = {
-			.clk = "core_clk",
-			.pclk = "iface_clk",
+		{
+			.gpu_freq = 192000000,
+			.bus_freq = 152000000,
+		},
+		{
+			.gpu_freq = 192000000,
+			.bus_freq = 0,
 		},
 	},
-	.imem_clk_name = {
-		.clk = "mem_clk",
-		.pclk = NULL,
-	},
+	.init_level = 0,
+	.num_levels = 3,
+	.set_grp_async = set_grp3d_async,
+	.idle_timeout = HZ/20,
+	.nap_allowed = true,
+	.idle_needed = true,
+	.clk_map = KGSL_CLK_SRC | KGSL_CLK_CORE |
+		KGSL_CLK_IFACE | KGSL_CLK_MEM,
 };
 
 struct platform_device msm_kgsl_3d0 = {
@@ -1160,26 +1154,20 @@ static struct resource kgsl_2d0_resources[] = {
 };
 
 static struct kgsl_device_platform_data kgsl_2d0_pdata = {
-	.pwr_data = {
-		.pwrlevel = {
-			{
-				.gpu_freq = 0,
-				.bus_freq = 192000000,
-			},
-		},
-		.init_level = 0,
-		.num_levels = 1,
-		/* HW workaround, run Z180 SYNC @ 192 MHZ */
-		.set_grp_async = NULL,
-		.idle_timeout = HZ/10,
-		.nap_allowed = true,
-	},
-	.clk = {
-		.name = {
-			.clk = "core_clk",
-			.pclk = "iface_clk",
+	.pwrlevel = {
+		{
+			.gpu_freq = 0,
+			.bus_freq = 192000000,
 		},
 	},
+	.init_level = 0,
+	.num_levels = 1,
+	/* HW workaround, run Z180 SYNC @ 192 MHZ */
+	.set_grp_async = NULL,
+	.idle_timeout = HZ/10,
+	.nap_allowed = true,
+	.idle_needed = true,
+	.clk_map = KGSL_CLK_CORE | KGSL_CLK_IFACE,
 };
 
 struct platform_device msm_kgsl_2d0 = {
@@ -1202,3 +1190,29 @@ struct platform_device *msm_footswitch_devices[] = {
 	FS_PCOM(FS_VPE,    "fs_vpe"),
 };
 unsigned msm_num_footswitch_devices = ARRAY_SIZE(msm_footswitch_devices);
+
+static struct resource gpio_resources[] = {
+	{
+		.start	= INT_GPIO_GROUP1,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= INT_GPIO_GROUP2,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device msm_device_gpio = {
+	.name		= "msmgpio",
+	.id		= -1,
+	.resource	= gpio_resources,
+	.num_resources	= ARRAY_SIZE(gpio_resources),
+};
+
+static int __init msm7630_init_gpio(void)
+{
+	platform_device_register(&msm_device_gpio);
+	return 0;
+}
+
+postcore_initcall(msm7630_init_gpio);

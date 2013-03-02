@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -75,7 +75,6 @@ enum pm8xxx_adc_channels {
 	ADC_MPP_1_ATEST_5,
 	ADC_MPP_1_ATEST_6,
 	ADC_MPP_1_ATEST_7,
-	ADC_MPP_1_CHANNEL_NONE,
 	ADC_MPP_2_ATEST_8 = 40,
 	ADC_MPP_2_USB_SNS_DIV20,
 	ADC_MPP_2_DCIN_SNS_DIV20,
@@ -92,12 +91,12 @@ enum pm8xxx_adc_channels {
 	ADC_MPP_2_ATEST_5,
 	ADC_MPP_2_ATEST_6,
 	ADC_MPP_2_ATEST_7,
-	ADC_MPP_2_CHANNEL_NONE,
+	ADC_CHANNEL_MAX_NUM,
 };
 
 #define PM8XXX_ADC_PMIC_0	0x0
 
-#define PM8XXX_CHANNEL_ADC_625_MV	625
+#define PM8XXX_CHANNEL_ADC_625_UV	625000
 #define PM8XXX_CHANNEL_MPP_SCALE1_IDX	20
 #define PM8XXX_CHANNEL_MPP_SCALE3_IDX	40
 
@@ -107,6 +106,7 @@ enum pm8xxx_adc_channels {
 #define PM8XXX_AMUX_MPP_6	0x6
 #define PM8XXX_AMUX_MPP_7	0x7
 #define PM8XXX_AMUX_MPP_8	0x8
+#define PM8XXX_AMUX_MPP_9	0x9				// p13106 Touch_ID ADC
 
 #define PM8XXX_ADC_DEV_NAME	"pm8xxx-adc"
 
@@ -218,17 +218,19 @@ enum pm8xxx_adc_scale_fn_type {
 
 /**
  * struct pm8xxx_adc_linear_graph - Represent ADC characteristics
- * @offset: Offset with respect to the actual curve
  * @dy: Numerator slope to calculate the gain
  * @dx: Denominator slope to calculate the gain
+ * @adc_vref: A/D word of the voltage reference used for the channel
+ * @adc_gnd: A/D word of the ground reference used for the channel
  *
  * Each ADC device has different offset and gain parameters which are computed
  * to calibrate the device.
  */
 struct pm8xxx_adc_linear_graph {
-	int32_t offset;
-	int32_t dy;
-	int32_t dx;
+	int64_t dy;
+	int64_t dx;
+	int64_t adc_vref;
+	int64_t adc_gnd;
 };
 
 /**
@@ -288,6 +290,10 @@ struct pm8xxx_adc_chan_properties {
  *		 here is a number relative to a reference of a given ADC
  * @physical: The data meaningful for each individual channel whether it is
  *	      voltage, current, temperature, etc.
+ *	      All voltage units are represented in micro - volts.
+ *	      -Battery temperature units are represented as 0.1 DegC
+ *	      -PA Therm temperature units are represented as DegC
+ *	      -PMIC Die temperature units are represented as 0.001 DegC
  */
 struct pm8xxx_adc_chan_result {
 	uint32_t	chan;
@@ -375,6 +381,21 @@ int32_t pm8xxx_adc_scale_pmic_therm(int32_t adc_code,
 			const struct pm8xxx_adc_properties *adc_prop,
 			const struct pm8xxx_adc_chan_properties *chan_prop,
 			struct pm8xxx_adc_chan_result *chan_rslt);
+/**
+ * pm8xxx_adc_scale_batt_id() - Scales the pre-calibrated digital output
+ *		of an ADC to the ADC reference and compensates for the
+ *		gain and offset.
+ * @adc_code:	pre-calibrated digital ouput of the ADC.
+ * @adc_prop:	adc properties of the pm8xxx adc such as bit resolution,
+ *		reference voltage.
+ * @chan_prop:	individual channel properties to compensate the i/p scaling,
+ *		slope and offset.
+ * @chan_rslt:	physical result to be stored.
+ */
+int32_t pm8xxx_adc_scale_batt_id(int32_t adc_code,
+			const struct pm8xxx_adc_properties *adc_prop,
+			const struct pm8xxx_adc_chan_properties *chan_prop,
+			struct pm8xxx_adc_chan_result *chan_rslt);
 #else
 static inline int32_t pm8xxx_adc_scale_default(int32_t adc_code,
 			const struct pm8xxx_adc_properties *adc_prop,
@@ -397,6 +418,11 @@ static inline int32_t pm8xxx_adc_scale_pa_therm(int32_t adc_code,
 			struct pm8xxx_adc_chan_result *chan_rslt)
 { return -ENXIO; }
 static inline int32_t pm8xxx_adc_scale_pmic_therm(int32_t adc_code,
+			const struct pm8xxx_adc_properties *adc_prop,
+			const struct pm8xxx_adc_chan_properties *chan_prop,
+			struct pm8xxx_adc_chan_result *chan_rslt)
+{ return -ENXIO; }
+static inline int32_t pm8xxx_adc_scale_batt_id(int32_t adc_code,
 			const struct pm8xxx_adc_properties *adc_prop,
 			const struct pm8xxx_adc_chan_properties *chan_prop,
 			struct pm8xxx_adc_chan_result *chan_rslt)
@@ -453,8 +479,8 @@ struct pm8xxx_adc_amux {
  * levels once the thresholds are reached
  */
 struct pm8xxx_adc_arb_btm_param {
-	uint32_t	low_thr_temp;
-	uint32_t	high_thr_temp;
+	int32_t		low_thr_temp;
+	int32_t		high_thr_temp;
 	uint64_t	low_thr_voltage;
 	uint64_t	high_thr_voltage;
 	int32_t		interval;
@@ -462,8 +488,9 @@ struct pm8xxx_adc_arb_btm_param {
 	void		(*btm_cool_fn) (bool);
 };
 
-int32_t pm8xxx_adc_batt_scaler(struct pm8xxx_adc_arb_btm_param *);
-
+int32_t pm8xxx_adc_batt_scaler(struct pm8xxx_adc_arb_btm_param *,
+			const struct pm8xxx_adc_properties *adc_prop,
+			const struct pm8xxx_adc_chan_properties *chan_prop);
 /**
  * struct pm8xxx_adc_platform_data - PM8XXX ADC platform data
  * @adc_prop: ADC specific parameters, voltage and channel setup

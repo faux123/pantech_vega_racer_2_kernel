@@ -21,12 +21,14 @@
 #include <linux/kdebug.h>
 #include <linux/module.h>
 #include <linux/kexec.h>
+#include <linux/bug.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 
 #include <asm/atomic.h>
 #include <asm/cacheflush.h>
+#include <asm/exception.h>
 #include <asm/system.h>
 #include <asm/unistd.h>
 #include <asm/traps.h>
@@ -34,6 +36,16 @@
 #include <asm/tls.h>
 
 #include "signal.h"
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#include "../mach-msm/sky_sys_reset.h"
+#endif
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+extern void apainc_kernel_stack_dump_start(void);
+extern void apainc_kernel_stack_dump(const char *name, int size);
+extern int pantech_kernel_stack_dump_disable(void);
+extern void pantech_machine_crash_shutdown(struct pt_regs *regs);
+#endif
 
 static const char *handler[]= { "prefetch abort", "data abort", "address exception", "interrupt" };
 
@@ -55,8 +67,40 @@ static void dump_mem(const char *, const char *, unsigned long, unsigned long);
 void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long frame)
 {
 #ifdef CONFIG_KALLSYMS
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+  char *modname;
+  const char *name;
+  unsigned long offset, size;
+  int len;
+  char buffer[KSYM_NAME_LEN];
+   
+  memset(buffer, 0x00, KSYM_NAME_LEN);
+  name = kallsyms_lookup(where, &size, &offset, &modname, buffer);
+  if (!name)
+    sprintf(buffer, "0x%lx", where);
+  
+  if (name != buffer)
+    strcpy(buffer, name);
+  len = strlen(buffer);
+
+  if(buffer[0] != 0x00)
+  {
+    apainc_kernel_stack_dump(buffer, strlen(buffer));
+  }
+#endif
 	printk("[<%08lx>] (%pS) from [<%08lx>] (%pS)\n", where, (void *)where, from, (void *)from);
 #else
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+  char buffer[KSYM_NAME_LEN];
+  memset(buffer, 0x00, KSYM_NAME_LEN);
+  sprintf(buffer, "%d", where);
+  if(buffer[0] != 0x00)
+  {
+    apainc_kernel_stack_dump(buffer, strlen(buffer));
+  }
+#endif
+
 	printk("Function entered at [<%08lx>] from [<%08lx>]\n", where, from);
 #endif
 
@@ -204,6 +248,11 @@ static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 
 void dump_stack(void)
 {
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	if(pantech_kernel_stack_dump_disable ())
+		printk("In panic from Apps watchdog bark \n");
+	else
+#endif  
 	dump_backtrace(NULL, NULL);
 }
 
@@ -241,21 +290,42 @@ static int __die(const char *str, int err, struct thread_info *thread, struct pt
 		return ret;
 
 	print_modules();
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING 
+ 	if(!pantech_kernel_stack_dump_disable ())
+#endif   
 	__show_regs(regs);
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	__save_regs_and_mmu(regs);
+#endif
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	if(regs)
+	{
+		printk(KERN_DEBUG "CPU %u has crashed in die\n", smp_processor_id());
+		pantech_machine_crash_shutdown(regs);
+	}
+#endif
+
 	printk(KERN_EMERG "Process %.*s (pid: %d, stack limit = 0x%p)\n",
 		TASK_COMM_LEN, tsk->comm, task_pid_nr(tsk), thread + 1);
 
 	if (!user_mode(regs) || in_interrupt()) {
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING  
+	  if(!pantech_kernel_stack_dump_disable ()) {
+#endif    
 		dump_mem(KERN_EMERG, "Stack: ", regs->ARM_sp,
 			 THREAD_SIZE + (unsigned long)task_stack_page(tsk));
 		dump_backtrace(regs, tsk);
 		dump_instr(KERN_EMERG, regs);
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING  
+	}
+#endif   
 	}
 
 	return ret;
 }
 
-static DEFINE_SPINLOCK(die_lock);
+static DEFINE_RAW_SPINLOCK(die_lock);
 
 /*
  * This function is protected against re-entrancy.
@@ -264,12 +334,20 @@ void die(const char *str, struct pt_regs *regs, int err)
 {
 	struct thread_info *thread = current_thread_info();
 	int ret;
+	enum bug_trap_type bug_type = BUG_TRAP_TYPE_NONE;
 
 	oops_enter();
 
-	spin_lock_irq(&die_lock);
+ #ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	apainc_kernel_stack_dump_start();
+ #endif
+	raw_spin_lock_irq(&die_lock);
 	console_verbose();
 	bust_spinlocks(1);
+	if (!user_mode(regs))
+		bug_type = report_bug(regs->ARM_pc, regs);
+	if (bug_type != BUG_TRAP_TYPE_NONE)
+		str = "Oops - BUG";
 	ret = __die(str, err, thread, regs);
 
 	if (regs && kexec_should_crash(thread->task))
@@ -277,13 +355,22 @@ void die(const char *str, struct pt_regs *regs, int err)
 
 	bust_spinlocks(0);
 	add_taint(TAINT_DIE);
-	spin_unlock_irq(&die_lock);
+	raw_spin_unlock_irq(&die_lock);
 	oops_exit();
-
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	sky_reset_reason=SYS_RESET_REASON_LINUX;
+#endif
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+	if (in_interrupt())
+		panic("Fatal exception in interrupt : %s",str);
+	if (panic_on_oops)
+		panic("Fatal exception : %s",str);
+#else
 	if (in_interrupt())
 		panic("Fatal exception in interrupt");
 	if (panic_on_oops)
 		panic("Fatal exception");
+#endif
 	if (ret != NOTIFY_STOP)
 		do_exit(SIGSEGV);
 }
@@ -301,25 +388,43 @@ void arm_notify_die(const char *str, struct pt_regs *regs,
 	}
 }
 
+#ifdef CONFIG_GENERIC_BUG
+
+int is_valid_bugaddr(unsigned long pc)
+{
+#ifdef CONFIG_THUMB2_KERNEL
+	unsigned short bkpt;
+#else
+	unsigned long bkpt;
+#endif
+
+	if (probe_kernel_address((unsigned *)pc, bkpt))
+		return 0;
+
+	return bkpt == BUG_INSTR_VALUE;
+}
+
+#endif
+
 static LIST_HEAD(undef_hook);
-static DEFINE_SPINLOCK(undef_lock);
+static DEFINE_RAW_SPINLOCK(undef_lock);
 
 void register_undef_hook(struct undef_hook *hook)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&undef_lock, flags);
+	raw_spin_lock_irqsave(&undef_lock, flags);
 	list_add(&hook->node, &undef_hook);
-	spin_unlock_irqrestore(&undef_lock, flags);
+	raw_spin_unlock_irqrestore(&undef_lock, flags);
 }
 
 void unregister_undef_hook(struct undef_hook *hook)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&undef_lock, flags);
+	raw_spin_lock_irqsave(&undef_lock, flags);
 	list_del(&hook->node);
-	spin_unlock_irqrestore(&undef_lock, flags);
+	raw_spin_unlock_irqrestore(&undef_lock, flags);
 }
 
 static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
@@ -328,12 +433,12 @@ static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
 	unsigned long flags;
 	int (*fn)(struct pt_regs *regs, unsigned int instr) = NULL;
 
-	spin_lock_irqsave(&undef_lock, flags);
+	raw_spin_lock_irqsave(&undef_lock, flags);
 	list_for_each_entry(hook, &undef_hook, node)
 		if ((instr & hook->instr_mask) == hook->instr_val &&
 		    (regs->ARM_cpsr & hook->cpsr_mask) == hook->cpsr_val)
 			fn = hook->fn;
-	spin_unlock_irqrestore(&undef_lock, flags);
+	raw_spin_unlock_irqrestore(&undef_lock, flags);
 
 	return fn ? fn(regs, instr) : 1;
 }
@@ -696,16 +801,6 @@ baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 
 	arm_notify_die("unknown data abort code", regs, &info, instr, 0);
 }
-
-void __attribute__((noreturn)) __bug(const char *file, int line)
-{
-	printk(KERN_CRIT"kernel BUG at %s:%d!\n", file, line);
-	*(int *)0 = 0;
-
-	/* Avoid "noreturn function does return" */
-	for (;;);
-}
-EXPORT_SYMBOL(__bug);
 
 void __readwrite_bug(const char *fn)
 {

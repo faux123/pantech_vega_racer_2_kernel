@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,10 +13,13 @@
 #define __Q6AFE_H__
 #include <sound/apr_audio.h>
 
-#define MSM_AFE_MONO		0
-#define MSM_AFE_MONO_RIGHT	1
-#define MSM_AFE_MONO_LEFT	2
-#define MSM_AFE_STEREO		3
+#define MSM_AFE_MONO        0
+#define MSM_AFE_MONO_RIGHT  1
+#define MSM_AFE_MONO_LEFT   2
+#define MSM_AFE_STEREO      3
+#define MSM_AFE_4CHANNELS   4
+#define MSM_AFE_6CHANNELS   6
+#define MSM_AFE_8CHANNELS   8
 
 #define MSM_AFE_PORT_TYPE_RX 0
 #define MSM_AFE_PORT_TYPE_TX 1
@@ -73,7 +76,9 @@ int afe_get_port_index(u16 port_id);
 int afe_start_pseudo_port(u16 port_id);
 int afe_stop_pseudo_port(u16 port_id);
 int afe_cmd_memory_map(u32 dma_addr_p, u32 dma_buf_sz);
+int afe_cmd_memory_map_nowait(u32 dma_addr_p, u32 dma_buf_sz);
 int afe_cmd_memory_unmap(u32 dma_addr_p);
+int afe_cmd_memory_unmap_nowait(u32 dma_addr_p);
 
 int afe_register_get_events(u16 port_id,
 		void (*cb) (uint32_t opcode,
@@ -93,4 +98,6 @@ int afe_get_port_type(u16 port_id);
  */
 int afe_convert_virtual_to_portid(u16 port_id);
 
+int afe_pseudo_port_start_nowait(u16 port_id);
+int afe_pseudo_port_stop_nowait(u16 port_id);
 #endif /* __Q6AFE_H__ */

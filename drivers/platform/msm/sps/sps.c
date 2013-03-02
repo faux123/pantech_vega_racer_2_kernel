@@ -26,6 +26,7 @@
 #include <linux/platform_device.h>	/* platform_get_resource_byname() */
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
+#include <linux/of.h>
 #include <mach/msm_sps.h>	/* msm_sps_platform_data */
 
 #include "sps_bam.h"
@@ -425,6 +426,85 @@ static struct sps_bam *phy2bam(u32 phys_addr)
 }
 
 /**
+ * Find the handle of a BAM device based on the physical address
+ *
+ * This function finds a BAM device in the BAM registration list that
+ * matches the specified physical address, and returns its handle.
+ *
+ * @phys_addr - physical address of the BAM
+ *
+ * @h - device handle of the BAM
+ *
+ * @return 0 on success, negative value on error
+ *
+ */
+int sps_phy2h(u32 phys_addr, u32 *handle)
+{
+	struct sps_bam *bam;
+
+	list_for_each_entry(bam, &sps->bams_q, list) {
+		if (bam->props.phys_addr == phys_addr) {
+			*handle = (u32) bam;
+			return 0;
+		}
+	}
+
+	SPS_INFO("sps: BAM device 0x%x is not registered yet.\n", phys_addr);
+
+	return -ENODEV;
+}
+EXPORT_SYMBOL(sps_phy2h);
+
+/**
+ * Setup desc/data FIFO for bam-to-bam connection
+ *
+ * @mem_buffer - Pointer to struct for allocated memory properties.
+ *
+ * @addr - address of FIFO
+ *
+ * @size - FIFO size
+ *
+ * @use_offset - use address offset instead of absolute address
+ *
+ * @return 0 on success, negative value on error
+ *
+ */
+int sps_setup_bam2bam_fifo(struct sps_mem_buffer *mem_buffer,
+		  u32 addr, u32 size, int use_offset)
+{
+	if ((mem_buffer == NULL) || (size == 0))
+		return SPS_ERROR;
+
+	if (use_offset) {
+		if ((addr + size) <= sps->pipemem_size)
+			mem_buffer->phys_base = sps->pipemem_phys_base + addr;
+		else {
+			SPS_ERR("sps: requested mem is out of "
+					"pipe mem range.\n");
+			return SPS_ERROR;
+		}
+	} else {
+		if (addr >= sps->pipemem_phys_base &&
+			(addr + size) <= (sps->pipemem_phys_base
+						+ sps->pipemem_size))
+			mem_buffer->phys_base = addr;
+		else {
+			SPS_ERR("sps: requested mem is out of "
+					"pipe mem range.\n");
+			return SPS_ERROR;
+		}
+	}
+
+	mem_buffer->base = spsi_get_mem_ptr(mem_buffer->phys_base);
+	mem_buffer->size = size;
+
+	memset(mem_buffer->base, 0, mem_buffer->size);
+
+	return 0;
+}
+EXPORT_SYMBOL(sps_setup_bam2bam_fifo);
+
+/**
  * Find the BAM device from the handle
  *
  * This function finds a BAM device in the BAM registration list that
@@ -597,7 +677,7 @@ int sps_disconnect(struct sps_pipe *h)
 	if (pipe == NULL)
 		return SPS_ERROR;
 
-	bam = sps_bam_lock(pipe);
+	bam = pipe->bam;
 	if (bam == NULL)
 		return SPS_ERROR;
 
@@ -620,7 +700,9 @@ int sps_disconnect(struct sps_pipe *h)
 	}
 
 	/* Disconnect the BAM pipe */
+	mutex_lock(&bam->lock);
 	result = sps_rm_state_change(pipe, SPS_STATE_DISCONNECT);
+	mutex_unlock(&bam->lock);
 	if (result)
 		goto exit_err;
 
@@ -628,7 +710,6 @@ int sps_disconnect(struct sps_pipe *h)
 	result = 0;
 
 exit_err:
-	sps_bam_unlock(bam);
 
 	return result;
 }
@@ -725,7 +806,6 @@ int sps_transfer(struct sps_pipe *h, struct sps_transfer *transfer)
 	struct sps_pipe *pipe = h;
 	struct sps_bam *bam;
 	int result;
-	int ret;
 
 	SPS_DBG("%s.", __func__);
 
@@ -733,16 +813,7 @@ int sps_transfer(struct sps_pipe *h, struct sps_transfer *transfer)
 	if (bam == NULL)
 		return SPS_ERROR;
 
-	ret = clk_enable(sps->dfab_clk);
-	if (ret) {
-		SPS_ERR("sps:failed to enable dfab_clk. ret=%d", ret);
-		sps_bam_unlock(bam);
-		return SPS_ERROR;
-	}
-
 	result = sps_bam_pipe_transfer(bam, pipe->pipe_index, transfer);
-
-	clk_disable(sps->dfab_clk);
 
 	sps_bam_unlock(bam);
 
@@ -760,7 +831,6 @@ int sps_transfer_one(struct sps_pipe *h, u32 addr, u32 size,
 	struct sps_pipe *pipe = h;
 	struct sps_bam *bam;
 	int result;
-	int ret;
 
 	SPS_DBG("%s.", __func__);
 
@@ -768,17 +838,8 @@ int sps_transfer_one(struct sps_pipe *h, u32 addr, u32 size,
 	if (bam == NULL)
 		return SPS_ERROR;
 
-	ret = clk_enable(sps->dfab_clk);
-	if (ret) {
-		SPS_ERR("sps:failed to enable dfab_clk. ret=%d", ret);
-		sps_bam_unlock(bam);
-		return SPS_ERROR;
-	}
-
 	result = sps_bam_pipe_transfer_one(bam, pipe->pipe_index,
 					   addr, size, user, flags);
-
-	clk_disable(sps->dfab_clk);
 
 	sps_bam_unlock(bam);
 
@@ -1142,11 +1203,11 @@ exit_err:
 	mutex_unlock(&sps->lock);
 
 	if (result) {
-		if (virt_addr != NULL)
-			iounmap(bam->props.virt_addr);
-
-		if (bam != NULL)
+		if (bam != NULL) {
+			if (virt_addr != NULL)
+				iounmap(bam->props.virt_addr);
 			kfree(bam);
+		}
 
 		return result;
 	}
@@ -1368,13 +1429,74 @@ static int get_platform_data(struct platform_device *pdev)
 	return 0;
 }
 
+/**
+ * Read data from device tree
+ */
+static int get_device_tree_data(struct platform_device *pdev)
+{
+#ifdef CONFIG_SPS_SUPPORT_BAMDMA
+	struct resource *resource;
+
+	if (of_property_read_u32((&pdev->dev)->of_node,
+				"qcom,bam-dma-res-pipes",
+				&sps->bamdma_restricted_pipes))
+		return -EINVAL;
+	else
+		SPS_DBG("sps:bamdma_restricted_pipes=0x%x.",
+			sps->bamdma_restricted_pipes);
+
+	resource  = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (resource) {
+		sps->bamdma_bam_phys_base = resource->start;
+		sps->bamdma_bam_size = resource_size(resource);
+		SPS_DBG("sps:bamdma_bam.base=0x%x,size=0x%x.",
+			sps->bamdma_bam_phys_base,
+			sps->bamdma_bam_size);
+	} else {
+		SPS_ERR("sps:BAM DMA BAM mem unavailable.");
+		return -ENODEV;
+	}
+
+	resource  = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	if (resource) {
+		sps->bamdma_dma_phys_base = resource->start;
+		sps->bamdma_dma_size = resource_size(resource);
+		SPS_DBG("sps:bamdma_dma.base=0x%x,size=0x%x.",
+			sps->bamdma_dma_phys_base,
+			sps->bamdma_dma_size);
+	} else {
+		SPS_ERR("sps:BAM DMA mem unavailable.");
+		return -ENODEV;
+	}
+
+	resource  = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (resource) {
+		sps->bamdma_irq = resource->start;
+		SPS_DBG("sps:bamdma_irq=%d.", sps->bamdma_irq);
+	} else {
+		SPS_ERR("sps:BAM DMA IRQ unavailable.");
+		return -ENODEV;
+	}
+#endif
+
+	return 0;
+}
+
 static int __devinit msm_sps_probe(struct platform_device *pdev)
 {
 	int ret;
 
 	SPS_DBG("sps:msm_sps_probe.");
 
-	ret = get_platform_data(pdev);
+	if (pdev->dev.of_node) {
+		SPS_DBG("sps:get data from device tree.");
+		ret = get_device_tree_data(pdev);
+
+	} else {
+		SPS_DBG("sps:get platform data.");
+		ret = get_platform_data(pdev);
+	}
+
 	if (ret)
 		return -ENODEV;
 
@@ -1432,14 +1554,24 @@ static int __devinit msm_sps_probe(struct platform_device *pdev)
 			goto clk_err;
 		}
 	}
-#endif
 
+	ret = clk_enable(sps->dfab_clk);
+	if (ret) {
+		SPS_ERR("sps:failed to enable dfab_clk. ret=%d", ret);
+		goto clk_err;
+	}
+#endif
 	ret = sps_device_init();
 	if (ret) {
 		SPS_ERR("sps:sps_device_init err.");
+#ifdef CONFIG_SPS_SUPPORT_BAMDMA
+		clk_disable(sps->dfab_clk);
+#endif
 		goto sps_device_init_err;
 	}
-
+#ifdef CONFIG_SPS_SUPPORT_BAMDMA
+	clk_disable(sps->dfab_clk);
+#endif
 	sps->is_ready = true;
 
 	SPS_INFO("sps is ready.");
@@ -1472,11 +1604,18 @@ static int __devexit msm_sps_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static struct of_device_id msm_sps_match[] = {
+	{	.compatible = "qcom,msm_sps",
+	},
+	{}
+};
+
 static struct platform_driver msm_sps_driver = {
 	.probe          = msm_sps_probe,
 	.driver		= {
 		.name	= SPS_DRV_NAME,
 		.owner	= THIS_MODULE,
+		.of_match_table = msm_sps_match,
 	},
 	.remove		= __exit_p(msm_sps_remove),
 };

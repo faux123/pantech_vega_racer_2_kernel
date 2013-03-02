@@ -51,9 +51,12 @@
 #define ASYNC_INTR_CTRL         (1 << 29) /* Enable async interrupt */
 #define ULPI_STP_CTRL           (1 << 30) /* Block communication with PHY */
 #define PHY_RETEN               (1 << 1) /* PHY retention enable/disable */
+#define PHY_IDHV_INTEN          (1 << 8) /* PHY ID HV interrupt */
+#define PHY_OTGSESSVLDHV_INTEN  (1 << 9) /* PHY Session Valid HV int. */
 
 /* OTG definitions */
 #define OTGSC_INTSTS_MASK	(0x7f << 16)
+#define OTGSC_IDPU		(1 << 5)
 #define OTGSC_ID		(1 << 8)
 #define OTGSC_BSV		(1 << 11)
 #define OTGSC_IDIS		(1 << 16)

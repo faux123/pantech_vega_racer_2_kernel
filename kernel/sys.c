@@ -38,6 +38,8 @@
 #include <linux/fs_struct.h>
 #include <linux/gfp.h>
 #include <linux/syscore_ops.h>
+#include <linux/version.h>
+#include <linux/ctype.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -45,6 +47,8 @@
 #include <linux/user_namespace.h>
 
 #include <linux/kmsg_dump.h>
+/* Move somewhere else to avoid recompiling? */
+#include <generated/utsrelease.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -327,13 +331,29 @@ void kernel_restart_prepare(char *cmd)
  *	Shutdown everything and perform a clean reboot.
  *	This is not safe to call in interrupt context.
  */
+
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+extern void android_poweroff(void);
+#endif
+
 void kernel_restart(char *cmd)
 {
 	kernel_restart_prepare(cmd);
-	if (!cmd)
+	if (!cmd){
 		printk(KERN_EMERG "Restarting system.\n");
-	else
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+			android_poweroff();
+#endif
+
+	}
+	else{
 		printk(KERN_EMERG "Restarting system with command '%s'.\n", cmd);
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+		if(strcmp(cmd,"recovery") == 0){
+			android_poweroff();
+		}
+#endif
+	}
 	kmsg_dump(KMSG_DUMP_RESTART);
 	machine_restart(cmd);
 }
@@ -418,6 +438,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	mutex_lock(&reboot_mutex);
 	switch (cmd) {
 	case LINUX_REBOOT_CMD_RESTART:
+#if defined(PANTECH_ERR_CRASH_LOGGING ) || defined(CONFIG_PANTECH_EXT4_RO_REMOUNT_ON_EMERGENCY_RESET)
+		printk("emergency_sync() and emergency_remount() - LINUX_REBOOT_CMD_RESTART.\n");  
+		emergency_sync();  
+		emergency_remount();  
+#endif
 		kernel_restart(NULL);
 		break;
 
@@ -430,11 +455,21 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		break;
 
 	case LINUX_REBOOT_CMD_HALT:
+#if defined(PANTECH_ERR_CRASH_LOGGING ) || defined(CONFIG_PANTECH_EXT4_RO_REMOUNT_ON_EMERGENCY_RESET)
+		printk("emergency_sync() and emergency_remount() - LINUX_REBOOT_CMD_HALT.\n");  
+		emergency_sync();  
+		emergency_remount();  
+#endif
 		kernel_halt();
 		do_exit(0);
 		panic("cannot halt");
 
 	case LINUX_REBOOT_CMD_POWER_OFF:
+#if defined(PANTECH_ERR_CRASH_LOGGING ) || defined(CONFIG_PANTECH_EXT4_RO_REMOUNT_ON_EMERGENCY_RESET)
+		printk("emergency_sync() and emergency_remount() - LINUX_REBOOT_CMD_POWER_OFF.\n");  
+		emergency_sync();  
+		emergency_remount();  
+#endif
 		kernel_power_off();
 		do_exit(0);
 		break;
@@ -446,6 +481,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		}
 		buffer[sizeof(buffer) - 1] = '\0';
 
+#if defined(PANTECH_ERR_CRASH_LOGGING ) || defined(CONFIG_PANTECH_EXT4_RO_REMOUNT_ON_EMERGENCY_RESET)
+		printk("emergency_sync() and emergency_remount() - LINUX_REBOOT_CMD_RESTART2.\n");  
+		emergency_sync();  
+		emergency_remount();  
+#endif
 		kernel_restart(buffer);
 		break;
 
@@ -1124,6 +1164,34 @@ DECLARE_RWSEM(uts_sem);
 #define override_architecture(name)	0
 #endif
 
+/*
+ * Work around broken programs that cannot handle "Linux 3.0".
+ * Instead we map 3.x to 2.6.40+x, so e.g. 3.0 would be 2.6.40
+ */
+static int override_release(char __user *release, int len)
+{
+	int ret = 0;
+	char buf[65];
+
+	if (current->personality & UNAME26) {
+		char *rest = UTS_RELEASE;
+		int ndots = 0;
+		unsigned v;
+
+		while (*rest) {
+			if (*rest == '.' && ++ndots >= 3)
+				break;
+			if (!isdigit(*rest) && *rest != '.')
+				break;
+			rest++;
+		}
+		v = ((LINUX_VERSION_CODE >> 8) & 0xff) + 40;
+		snprintf(buf, len, "2.6.%u%s", v, rest);
+		ret = copy_to_user(release, buf, len);
+	}
+	return ret;
+}
+
 SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 {
 	int errno = 0;
@@ -1133,6 +1201,8 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 		errno = -EFAULT;
 	up_read(&uts_sem);
 
+	if (!errno && override_release(name->release, sizeof(name->release)))
+		errno = -EFAULT;
 	if (!errno && override_architecture(name))
 		errno = -EFAULT;
 	return errno;
@@ -1154,6 +1224,8 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
 		error = -EFAULT;
 	up_read(&uts_sem);
 
+	if (!error && override_release(name->release, sizeof(name->release)))
+		error = -EFAULT;
 	if (!error && override_architecture(name))
 		error = -EFAULT;
 	return error;
@@ -1187,6 +1259,8 @@ SYSCALL_DEFINE1(olduname, struct oldold_utsname __user *, name)
 	up_read(&uts_sem);
 
 	if (!error && override_architecture(name))
+		error = -EFAULT;
+	if (!error && override_release(name->release, sizeof(name->release)))
 		error = -EFAULT;
 	return error ? -EFAULT : 0;
 }

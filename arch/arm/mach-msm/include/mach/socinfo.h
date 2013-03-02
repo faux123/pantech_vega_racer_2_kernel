@@ -16,6 +16,9 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/of_fdt.h>
+#include <linux/of.h>
 
 #include <asm/cputype.h>
 #include <asm/mach-types.h>
@@ -27,6 +30,16 @@
  */
 #define SOCINFO_VERSION_MAJOR(ver) ((ver & 0xffff0000) >> 16)
 #define SOCINFO_VERSION_MINOR(ver) (ver & 0x0000ffff)
+
+#ifdef CONFIG_OF
+#define early_machine_is_copper()	\
+	of_flat_dt_is_compatible(of_get_flat_dt_root(), "qcom,msmcopper")
+#define machine_is_copper()		\
+	of_machine_is_compatible("qcom,msmcopper")
+#else
+#define early_machine_is_copper()	0
+#define machine_is_copper()		0
+#endif
 
 enum msm_cpu {
 	MSM_CPU_UNKNOWN = 0,
@@ -47,6 +60,8 @@ enum msm_cpu {
 	MSM_CPU_8930,
 	MSM_CPU_7X27AA,
 	MSM_CPU_9615,
+	MSM_CPU_COPPER,
+	MSM_CPU_8627,
 };
 
 enum msm_cpu socinfo_get_msm_cpu(void);
@@ -211,7 +226,18 @@ static inline int cpu_is_apq8064(void)
 static inline int cpu_is_msm8930(void)
 {
 #ifdef CONFIG_ARCH_MSM8930
-	return read_msm_cpu_type() == MSM_CPU_8930;
+	return (read_msm_cpu_type() == MSM_CPU_8930) ||
+	       (read_msm_cpu_type() == MSM_CPU_8627);
+#else
+	return 0;
+#endif
+}
+
+static inline int cpu_is_msm8627(void)
+{
+/* 8930 and 8627 will share the same CONFIG_ARCH type unless otherwise needed */
+#ifdef CONFIG_ARCH_MSM8930
+	return read_msm_cpu_type() == MSM_CPU_8627;
 #else
 	return 0;
 #endif

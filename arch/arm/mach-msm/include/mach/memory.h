@@ -21,7 +21,7 @@
 #define PLAT_PHYS_OFFSET UL(CONFIG_PHYS_OFFSET)
 
 #define MAX_PHYSMEM_BITS 32
-#define SECTION_SIZE_BITS 29
+#define SECTION_SIZE_BITS 28
 
 /* Maximum number of Memory Regions */
 #define MAX_NR_REGIONS 4
@@ -39,7 +39,11 @@
 #define EBI0_PAGE_OFFSET PAGE_OFFSET
 #define EBI0_SIZE 0x10000000
 
-#define EBI1_PHYS_OFFSET 0x40000000
+#ifndef __ASSEMBLY__
+
+extern unsigned long ebi1_phys_offset;
+
+#define EBI1_PHYS_OFFSET (ebi1_phys_offset)
 #define EBI1_PAGE_OFFSET (EBI0_PAGE_OFFSET + EBI0_SIZE)
 
 #if (defined(CONFIG_SPARSEMEM) && defined(CONFIG_VMSPLIT_3G))
@@ -55,10 +59,9 @@
 	(virt) - EBI0_PAGE_OFFSET + EBI0_PHYS_OFFSET)
 
 #endif
-
 #endif
 
-#define HAS_ARCH_IO_REMAP_PFN_RANGE
+#endif
 
 #ifndef __ASSEMBLY__
 void *alloc_bootmem_aligned(unsigned long size, unsigned long alignment);
@@ -91,6 +94,7 @@ extern void store_ttbr0(void);
 #ifdef CONFIG_DONT_MAP_HOLE_AFTER_MEMBANK0
 extern unsigned long membank0_size;
 extern unsigned long membank1_start;
+void find_membank0_hole(void);
 
 #define MEMBANK0_PHYS_OFFSET PHYS_OFFSET
 #define MEMBANK0_PAGE_OFFSET PAGE_OFFSET

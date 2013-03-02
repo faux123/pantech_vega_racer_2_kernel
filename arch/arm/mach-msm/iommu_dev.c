@@ -24,7 +24,6 @@
 
 #include <mach/iommu_hw-8xxx.h>
 #include <mach/iommu.h>
-#include <mach/clk.h>
 
 struct iommu_ctx_iter_data {
 	/* input */
@@ -69,7 +68,7 @@ struct device *msm_iommu_get_ctx(const char *ctx_name)
 	r.name = ctx_name;
 	found = device_for_each_child(&msm_iommu_root_dev->dev, &r, each_iommu);
 
-	if (!found) {
+	if (!found || !dev_get_drvdata(r.dev)) {
 		pr_err("Could not find context <%s>\n", ctx_name);
 		goto fail;
 	}
@@ -164,8 +163,10 @@ static int msm_iommu_probe(struct platform_device *pdev)
 	iommu_clk = clk_get(&pdev->dev, "core_clk");
 
 	if (!IS_ERR(iommu_clk))	{
-		if (clk_get_rate(iommu_clk) == 0)
-			clk_set_min_rate(iommu_clk, 1);
+		if (clk_get_rate(iommu_clk) == 0) {
+			ret = clk_round_rate(iommu_clk, 1);
+			clk_set_rate(iommu_clk, ret);
+		}
 
 		ret = clk_enable(iommu_clk);
 		if (ret) {

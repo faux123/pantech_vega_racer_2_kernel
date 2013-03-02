@@ -151,7 +151,7 @@ inline void msm_gemini_outbuf_q_cleanup(struct msm_gemini_q *q_p)
 		buf_p = msm_gemini_q_out(q_p);
 		if (buf_p) {
 			msm_gemini_platform_p2v(buf_p->file,
-						&buf_p->msm_buffer);
+				&buf_p->msm_buffer, &buf_p->handle);
 			GMN_DBG("%s:%d] %s\n", __func__, __LINE__, q_p->name);
 			kfree(buf_p->subsystem_id);
 			kfree(buf_p);
@@ -317,7 +317,8 @@ int msm_gemini_output_get(struct msm_gemini_device *pgmn_dev, void __user *to)
 	}
 
 	buf_cmd = buf_p->vbuf;
-	msm_gemini_platform_p2v(buf_p->file, &buf_p->msm_buffer);
+	msm_gemini_platform_p2v(buf_p->file, &buf_p->msm_buffer,
+				&buf_p->handle);
 	kfree(buf_p->subsystem_id);
 	kfree(buf_p);
 
@@ -368,7 +369,7 @@ int msm_gemini_output_buf_enqueue(struct msm_gemini_device *pgmn_dev,
 	}
 	buf_p->y_buffer_addr = msm_gemini_platform_v2p(buf_cmd.fd,
 		buf_cmd.y_len, &buf_p->file, &buf_p->msm_buffer,
-		buf_p->subsystem_id);
+		buf_p->subsystem_id, &buf_p->handle);
 	if (!buf_p->y_buffer_addr) {
 		GMN_PR_ERR("%s:%d] v2p wrong\n", __func__, __LINE__);
 		kfree(buf_p->subsystem_id);
@@ -434,7 +435,11 @@ int msm_gemini_input_get(struct msm_gemini_device *pgmn_dev, void __user * to)
 	}
 
 	buf_cmd = buf_p->vbuf;
-	msm_gemini_platform_p2v(buf_p->file, &buf_p->msm_buffer);
+	if (pgmn_dev->op_mode == MSM_GEMINI_MODE_OFFLINE_ENCODE ||
+		pgmn_dev->op_mode == MSM_GEMINI_MODE_OFFLINE_ROTATION) {
+		msm_gemini_platform_p2v(buf_p->file, &buf_p->msm_buffer,
+			&buf_p->handle);
+	}
 	kfree(buf_p->subsystem_id);
 	kfree(buf_p);
 
@@ -482,16 +487,23 @@ int msm_gemini_input_buf_enqueue(struct msm_gemini_device *pgmn_dev,
 		kfree(buf_p);
 		return -ENOMEM;
 	}
+	if (pgmn_dev->op_mode == MSM_GEMINI_MODE_REALTIME_ENCODE) {
+		buf_p->y_buffer_addr    = buf_cmd.y_off;
+	} else {
 	buf_p->y_buffer_addr    = msm_gemini_platform_v2p(buf_cmd.fd,
 		buf_cmd.y_len + buf_cmd.cbcr_len, &buf_p->file,
-			&buf_p->msm_buffer, buf_p->subsystem_id)
+			&buf_p->msm_buffer, buf_p->subsystem_id, &buf_p->handle)
 			+ buf_cmd.offset;
+	}
 	buf_p->y_len          = buf_cmd.y_len;
 
 	buf_p->cbcr_buffer_addr = buf_p->y_buffer_addr + buf_cmd.y_len;
 	buf_p->cbcr_len       = buf_cmd.cbcr_len;
 
 	buf_p->num_of_mcu_rows = buf_cmd.num_of_mcu_rows;
+	GMN_DBG("%s: y_addr=%x,y_len=%x,cbcr_addr=%x,cbcr_len=%x\n", __func__,
+		buf_p->y_buffer_addr, buf_p->y_len, buf_p->cbcr_buffer_addr,
+		buf_p->cbcr_len);
 
 	if (!buf_p->y_buffer_addr || !buf_p->cbcr_buffer_addr) {
 		GMN_PR_ERR("%s:%d] v2p wrong\n", __func__, __LINE__);

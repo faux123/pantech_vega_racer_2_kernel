@@ -82,6 +82,8 @@ extern uint32_t SMSM_NUM_HOSTS;
 #define SMSM_WKUP_REASON_TIMER	0x00000008
 #define SMSM_WKUP_REASON_ALARM	0x00000010
 #define SMSM_WKUP_REASON_RESET	0x00000020
+#define SMSM_A2_FORCE_SHUTDOWN 0x00002000
+#define SMSM_A2_RESET_BAM      0x00004000
 
 #define SMSM_VENDOR             0x00020000
 
@@ -91,6 +93,20 @@ extern uint32_t SMSM_NUM_HOSTS;
 #define SMSM_WLAN_TX_RINGS_EMPTY 0x00000200
 #define SMSM_WLAN_TX_ENABLE	0x00000400
 
+#if defined(CONFIG_PANTECH_PMIC)
+typedef struct
+{
+  uint32_t  power_on_reason;
+	uint32_t  factory_cable_adc;
+	uint32_t  battery_id_adc;
+	uint32_t  hw_rev_adc;
+	uint32_t  power_on_mode;
+	uint8_t   silent_boot_mode;
+	uint32_t  hw_rev;
+	uint32_t  battery_id;
+	uint8_t  backlight_off;
+} oem_pm_smem_vendor1_data_type;
+#endif
 
 void *smem_alloc(unsigned id, unsigned size);
 void *smem_alloc2(unsigned id, unsigned size_in);
@@ -207,7 +223,13 @@ enum {
 	SMEM_SMEM_LOG_MPROC_WRAP,
 	SMEM_BOOT_INFO_FOR_APPS,
 	SMEM_SMSM_SIZE_INFO,
-	SMEM_MEM_LAST = SMEM_SMSM_SIZE_INFO,
+	SMEM_SMD_LOOPBACK_REGISTER,
+	SMEM_SSR_REASON_MSS0,
+	SMEM_SSR_REASON_WCNSS0,
+	SMEM_SSR_REASON_LPASS0,
+	SMEM_SSR_REASON_DSPS0,
+	SMEM_SSR_REASON_VCODEC0,
+	SMEM_MEM_LAST = SMEM_SSR_REASON_VCODEC0,
 	SMEM_NUM_ITEMS,
 };
 

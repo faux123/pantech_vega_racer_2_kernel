@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2008 Google, Inc.
  * Author: Brian Swetland <swetland@google.com>
- * Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -21,6 +21,11 @@
 #include <linux/types.h>
 #include <linux/usb/otg.h>
 #include <linux/wakelock.h>
+#include <linux/pm_qos_params.h>
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_OTG_INTENT
+#include <linux/switch.h>
+#endif
 
 /**
  * Supported USB modes
@@ -71,6 +76,9 @@ enum msm_usb_phy_type {
 #define IDEV_CHG_MAX	1500
 #define IDEV_CHG_MIN	500
 #define IUNIT		100
+
+#define IDEV_ACA_CHG_MAX	1500
+#define IDEV_ACA_CHG_LIMIT	500
 
 /**
  * Different states involved in USB charger detection.
@@ -128,31 +136,58 @@ enum usb_chg_type {
 };
 
 /**
+ * SPS Pipes direction.
+ *
+ * USB_TO_PEER_PERIPHERAL	USB (as Producer) to other
+ *                          peer peripheral.
+ * PEER_PERIPHERAL_TO_USB	Other Peripheral to
+ *                          USB (as consumer).
+ */
+enum usb_bam_pipe_dir {
+	USB_TO_PEER_PERIPHERAL,
+	PEER_PERIPHERAL_TO_USB,
+};
+
+/**
  * struct msm_otg_platform_data - platform device data
  *              for msm_otg driver.
  * @phy_init_seq: PHY configuration sequence. val, reg pairs
  *              terminated by -1.
- * @vbus_power: VBUS power on/off routine.
+ * @vbus_power: VBUS power on/off routine.It should return result
+ *		as success(zero value) or failure(non-zero value).
  * @power_budget: VBUS power budget in mA (0 will be treated as 500mA).
  * @mode: Supported mode (OTG/peripheral/host).
  * @otg_control: OTG switch controlled by user/Id pin
  * @default_mode: Default operational mode. Applicable only if
  *              OTG switch is controller by user.
- * @pclk_src_name: pclk is derived from ebi1_usb_clk in case of 7x27 and 8k
- *              dfab_usb_hs_clk in case of 8660 and 8960.
  * @pmic_id_irq: IRQ number assigned for PMIC USB ID line.
+ * @mhl_enable: indicates MHL connector or not.
+ * @disable_reset_on_disconnect: perform USB PHY and LINK reset
+ *              on USB cable disconnection.
+ * @swfi_latency: miminum latency to allow swfi.
+ * @enable_dcd: Enable Data Contact Detection circuit. if not set
+ *              wait for 600msec before proceeding to primary
+ *              detection.
+ * @bus_scale_table: parameters for bus bandwidth requirements
  */
 struct msm_otg_platform_data {
 	int *phy_init_seq;
-	void (*vbus_power)(bool on);
+	int (*vbus_power)(bool on);
 	unsigned power_budget;
 	enum usb_mode_type mode;
 	enum otg_control_type otg_control;
 	enum usb_mode_type default_mode;
 	enum msm_usb_phy_type phy_type;
 	void (*setup_gpio)(enum usb_otg_state state);
-	char *pclk_src_name;
 	int pmic_id_irq;
+	bool mhl_enable;
+	bool disable_reset_on_disconnect;
+	u32 swfi_latency;
+	bool enable_dcd;
+	struct msm_bus_scale_pdata *bus_scale_table;
+#ifdef FEATURE_ANDROID_PANTECH_USB_OTG_MODE
+	int (*control_usb_switch)(int gpio, int value);
+#endif
 };
 
 /**
@@ -160,12 +195,10 @@ struct msm_otg_platform_data {
  * @otg: USB OTG Transceiver structure.
  * @pdata: otg device platform data.
  * @irq: IRQ number assigned for HSUSB controller.
- * @clk: clock struct of usb_hs_clk.
- * @pclk: clock struct of usb_hs_pclk.
- * @pclk_src: pclk source for voting.
- * @phy_reset_clk: clock struct of usb_phy_clk.
- * @core_clk: clock struct of usb_hs_core_clk.
- * @system_clk: clock struct of usb_system_clk.
+ * @clk: clock struct of alt_core_clk.
+ * @pclk: clock struct of iface_clk.
+ * @phy_reset_clk: clock struct of phy_clk.
+ * @core_clk: clock struct of core_bus_clk.
  * @regs: ioremapped register base address.
  * @inputs: OTG state machine inputs(Id, SessValid etc).
  * @sm_work: OTG state machine work.
@@ -183,6 +216,11 @@ struct msm_otg_platform_data {
  *             connected. Useful only when ACA_A charger is
  *             connected.
  * @mA_port: The amount of current drawn by the attached B-device.
+ * @pm_qos_req_dma: miminum DMA latency to vote against idle power
+	collapse when cable is connected.
+ * @id_timer: The timer used for polling ID line to detect ACA states.
+ * @xo_handle: TCXO buffer handle
+ * @bus_perf_client: Bus performance client handle to request BUS bandwidth
  */
 struct msm_otg {
 	struct otg_transceiver otg;
@@ -190,10 +228,8 @@ struct msm_otg {
 	int irq;
 	struct clk *clk;
 	struct clk *pclk;
-	struct clk *pclk_src;
 	struct clk *phy_reset_clk;
 	struct clk *core_clk;
-	struct clk *system_clk;
 	void __iomem *regs;
 #define ID		0
 #define B_SESS_VLD	1
@@ -212,7 +248,10 @@ struct msm_otg {
 	struct wake_lock wlock;
 	struct notifier_block usbdev_nb;
 	unsigned mA_port;
+	struct timer_list id_timer;
 	unsigned long caps;
+	struct msm_xo_voter *xo_handle;
+	uint32_t bus_perf_client;
 	/*
 	 * Allowing PHY power collpase turns off the HSUSB 3.3v and 1.8v
 	 * analog regulators while going to low power mode.
@@ -226,20 +265,57 @@ struct msm_otg {
 	 * voltage regulator(VDDCX).
 	 */
 #define ALLOW_PHY_RETENTION		BIT(1)
+#if 0//qualcomm otg patch
 	  /*
 	   * Disable the OTG comparators to save more power
 	   * if depends on PMIC for VBUS and ID interrupts.
 	   */
 #define ALLOW_PHY_COMP_DISABLE		BIT(2)
+#endif
 	unsigned long lpm_flags;
 #define PHY_PWR_COLLAPSED		BIT(0)
 #define PHY_RETENTIONED			BIT(1)
+#if 0//qualcomm otg patch
 #define PHY_OTG_COMP_DISABLED		BIT(2)
+#endif
+	struct pm_qos_request_list pm_qos_req_dma;
+	int reset_counter;
+#ifdef FEATURE_ANDROID_PANTECH_USB_OTG_MODE
+	int pmic_id_status;
+	struct delayed_work pmic_id_det;
+#endif
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_OTG_INTENT
+	struct switch_dev sdev_otg;
+	struct switch_dev sdev_otg_dev;
+#endif
+#ifdef FEATURE_PANTECH_USB_CABLE_CONNECT
+	int connect_state;
+	struct work_struct connect_work;
+#endif
 };
 
 struct msm_hsic_host_platform_data {
 	unsigned strobe;
 	unsigned data;
+	unsigned hub_reset;
 };
 
+struct usb_bam_pipe_connect {
+	u32 src_phy_addr;
+	int src_pipe_index;
+	u32 dst_phy_addr;
+	int dst_pipe_index;
+	u32 data_fifo_base_offset;
+	u32 data_fifo_size;
+	u32 desc_fifo_base_offset;
+	u32 desc_fifo_size;
+};
+
+struct msm_usb_bam_platform_data {
+	struct usb_bam_pipe_connect *connections;
+	unsigned long usb_bam_phy_base;
+	unsigned long usb_bam_phy_size;
+	int usb_bam_num_pipes;
+};
 #endif

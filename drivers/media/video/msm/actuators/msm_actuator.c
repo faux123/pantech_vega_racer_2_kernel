@@ -11,10 +11,6 @@
  */
 
 #include "msm_actuator.h"
-#include "msm_logging.h"
-
-LDECVAR(a_profstarttime);
-LDECVAR(a_profendtime);
 
 int32_t msm_actuator_write_focus(
 	struct msm_actuator_ctrl_t *a_ctrl,
@@ -304,6 +300,10 @@ int32_t msm_actuator_i2c_probe(
 	if (act_ctrl_t->i2c_addr != 0)
 		act_ctrl_t->i2c_client.client->addr =
 			act_ctrl_t->i2c_addr;
+    
+#ifdef CONFIG_OV8820_ACT// 1//CONFIG_PANTECH_CAMERA_AF_OFF_STEP
+    AF_off_step_ctrl = act_ctrl_t;
+#endif
 
 	/* act_ctrl_t->func_tbl.actuator_init_table(act_ctrl_t); */
 	LINFO("%s succeeded\n", __func__);

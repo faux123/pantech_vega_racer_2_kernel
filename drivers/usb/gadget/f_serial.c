@@ -13,11 +13,16 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
-#include <mach/usb_gadget_fserial.h>
+#include <mach/usb_gadget_xport.h>
 
 #include "u_serial.h"
 #include "gadget_chips.h"
 
+#define FEATURE_PANTECH_MODEM_REOPEN_DELAY
+
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+#include <linux/workqueue.h>
+#endif
 
 /*
  * This function packages a simple "generic serial" port with no real
@@ -27,6 +32,7 @@
  * CDC ACM driver.  However, for many purposes it's just as functional
  * if you can arrange appropriate host side drivers.
  */
+#define GSERIAL_NO_PORTS 2
 
 struct gser_descs {
 	struct usb_endpoint_descriptor	*in;
@@ -70,11 +76,16 @@ struct f_gser {
 #define ACM_CTRL_DSR		(1 << 1)
 #define ACM_CTRL_DCD		(1 << 0)
 #endif
+
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+	struct delayed_work connect_work;
+#endif
 };
 
 static unsigned int no_tty_ports;
 static unsigned int no_sdio_ports;
 static unsigned int no_smd_ports;
+static unsigned int no_hsic_sports;
 static unsigned int nr_ports;
 
 static struct port_info {
@@ -85,7 +96,7 @@ static struct port_info {
 
 static inline bool is_transport_sdio(enum transport_type t)
 {
-	if (t == USB_GADGET_FSERIAL_TRANSPORT_SDIO)
+	if (t == USB_GADGET_XPORT_SDIO)
 		return 1;
 	return 0;
 }
@@ -106,6 +117,39 @@ static inline struct f_gser *port_to_gser(struct gserial *p)
 /*-------------------------------------------------------------------------*/
 
 /* interface descriptor: */
+#if defined(CONFIG_ANDROID_PANTECH_USB)
+
+#if defined(FEATURE_ANDROID_PANTECH_USB_IAD)
+struct usb_interface_assoc_descriptor gser_interface_assoc_desc = {
+	.bLength           = sizeof gser_interface_assoc_desc,//USB_DT_INTERFACE_ASSOCIATION_SIZE,
+	.bDescriptorType   = USB_DT_INTERFACE_ASSOCIATION,
+	.bInterfaceCount   = 2,
+	.bFunctionClass =	USB_CLASS_COMM,
+	.bFunctionSubClass =	0x02,
+	.bFunctionProtocol =	0x01,
+};
+#endif
+static struct usb_interface_descriptor gser_acm_cdc_interface_desc = {
+  .bLength =    USB_DT_INTERFACE_SIZE,
+  .bDescriptorType =  USB_DT_INTERFACE,
+  .bNumEndpoints =  1,
+  .bInterfaceClass =  USB_CLASS_COMM,
+  .bInterfaceSubClass = 0x02,
+  .bInterfaceProtocol = 0x01,
+  .iInterface = 0,
+};
+  
+static struct usb_interface_descriptor gser_acm_data_interface_desc = {
+  .bLength =    USB_DT_INTERFACE_SIZE,
+  .bDescriptorType =  USB_DT_INTERFACE,
+  .bNumEndpoints =  2,
+  .bInterfaceClass =  USB_CLASS_CDC_DATA,
+  .bInterfaceSubClass = 0,
+  .bInterfaceProtocol = 0,
+  .iInterface = 0,  
+};
+
+#endif
 
 static struct usb_interface_descriptor gser_interface_desc = {
 	.bLength =		USB_DT_INTERFACE_SIZE,
@@ -121,7 +165,9 @@ static struct usb_interface_descriptor gser_interface_desc = {
 	.bInterfaceProtocol =	0,
 	/* .iInterface = DYNAMIC */
 };
+
 #ifdef CONFIG_MODEM_SUPPORT
+
 static struct usb_cdc_header_desc gser_header_desc  = {
 	.bLength =		sizeof(gser_header_desc),
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
@@ -179,6 +225,35 @@ static struct usb_endpoint_descriptor gser_fs_out_desc = {
 	.bmAttributes =		USB_ENDPOINT_XFER_BULK,
 };
 
+#if defined(CONFIG_ANDROID_PANTECH_USB)
+static struct usb_descriptor_header **gser_fs_function;
+
+static struct usb_descriptor_header *pantech_gser_fs_function[] = {
+#if defined(FEATURE_ANDROID_PANTECH_USB_IAD)
+	(struct usb_descriptor_header *) &gser_interface_assoc_desc,
+#endif
+  (struct usb_descriptor_header *) &gser_acm_cdc_interface_desc,
+  (struct usb_descriptor_header *) &gser_fs_notify_desc,
+  (struct usb_descriptor_header *) &gser_acm_data_interface_desc,
+  (struct usb_descriptor_header *) &gser_fs_in_desc,
+  (struct usb_descriptor_header *) &gser_fs_out_desc,
+  NULL,
+};
+
+static struct usb_descriptor_header *qualcomm_gser_fs_function[] = {
+	(struct usb_descriptor_header *) &gser_interface_desc,
+#ifdef CONFIG_MODEM_SUPPORT
+	(struct usb_descriptor_header *) &gser_header_desc,
+	(struct usb_descriptor_header *) &gser_call_mgmt_descriptor,
+	(struct usb_descriptor_header *) &gser_descriptor,
+	(struct usb_descriptor_header *) &gser_union_desc,
+	(struct usb_descriptor_header *) &gser_fs_notify_desc,
+#endif
+	(struct usb_descriptor_header *) &gser_fs_in_desc,
+	(struct usb_descriptor_header *) &gser_fs_out_desc,
+	NULL,
+};
+#else
 static struct usb_descriptor_header *gser_fs_function[] = {
 	(struct usb_descriptor_header *) &gser_interface_desc,
 #ifdef CONFIG_MODEM_SUPPORT
@@ -192,6 +267,7 @@ static struct usb_descriptor_header *gser_fs_function[] = {
 	(struct usb_descriptor_header *) &gser_fs_out_desc,
 	NULL,
 };
+#endif
 
 /* high speed support: */
 #ifdef CONFIG_MODEM_SUPPORT
@@ -219,6 +295,35 @@ static struct usb_endpoint_descriptor gser_hs_out_desc = {
 	.wMaxPacketSize =	__constant_cpu_to_le16(512),
 };
 
+#if defined(CONFIG_ANDROID_PANTECH_USB)
+static struct usb_descriptor_header **gser_hs_function;
+
+static struct usb_descriptor_header *pantech_gser_hs_function[] = {
+#if defined(FEATURE_ANDROID_PANTECH_USB_IAD)
+	(struct usb_descriptor_header *) &gser_interface_assoc_desc,
+#endif
+  (struct usb_descriptor_header *) &gser_acm_cdc_interface_desc,
+  (struct usb_descriptor_header *) &gser_hs_notify_desc,
+  (struct usb_descriptor_header *) &gser_acm_data_interface_desc,
+  (struct usb_descriptor_header *) &gser_hs_in_desc,
+  (struct usb_descriptor_header *) &gser_hs_out_desc,
+  NULL,
+};
+static struct usb_descriptor_header *qualcomm_gser_hs_function[] = {
+	(struct usb_descriptor_header *) &gser_interface_desc,
+#ifdef CONFIG_MODEM_SUPPORT
+	(struct usb_descriptor_header *) &gser_header_desc,
+	(struct usb_descriptor_header *) &gser_call_mgmt_descriptor,
+	(struct usb_descriptor_header *) &gser_descriptor,
+	(struct usb_descriptor_header *) &gser_union_desc,
+	(struct usb_descriptor_header *) &gser_hs_notify_desc,
+#endif
+	(struct usb_descriptor_header *) &gser_hs_in_desc,
+	(struct usb_descriptor_header *) &gser_hs_out_desc,
+	NULL,
+};
+
+#else
 static struct usb_descriptor_header *gser_hs_function[] = {
 	(struct usb_descriptor_header *) &gser_interface_desc,
 #ifdef CONFIG_MODEM_SUPPORT
@@ -232,6 +337,7 @@ static struct usb_descriptor_header *gser_hs_function[] = {
 	(struct usb_descriptor_header *) &gser_hs_out_desc,
 	NULL,
 };
+#endif
 
 /* string descriptors: */
 
@@ -250,37 +356,16 @@ static struct usb_gadget_strings *gser_strings[] = {
 	NULL,
 };
 
-static char *transport_to_str(enum transport_type t)
-{
-	switch (t) {
-	case USB_GADGET_FSERIAL_TRANSPORT_TTY:
-		return "TTY";
-	case USB_GADGET_FSERIAL_TRANSPORT_SDIO:
-		return "SDIO";
-	case USB_GADGET_FSERIAL_TRANSPORT_SMD:
-		return "SMD";
-	}
-
-	return "NONE";
-}
-
-static enum transport_type serial_str_to_transport(const char *name)
-{
-	if (!strcasecmp("SDIO", name))
-		return USB_GADGET_FSERIAL_TRANSPORT_SDIO;
-	if (!strcasecmp("SMD", name))
-		return USB_GADGET_FSERIAL_TRANSPORT_SMD;
-
-	return USB_GADGET_FSERIAL_TRANSPORT_TTY;
-}
-
-
 static int gport_setup(struct usb_configuration *c)
 {
 	int ret = 0;
+	int port_idx;
+	int i;
 
-	pr_debug("%s: no_tty_ports:%u no_sdio_ports: %u nr_ports:%u\n",
-			__func__, no_tty_ports, no_sdio_ports, nr_ports);
+	pr_debug("%s: no_tty_ports: %u no_sdio_ports: %u"
+		" no_smd_ports: %u no_hsic_sports: %u nr_ports: %u\n",
+			__func__, no_tty_ports, no_sdio_ports, no_smd_ports,
+			no_hsic_sports, nr_ports);
 
 	if (no_tty_ports)
 		ret = gserial_setup(c->cdev->gadget, no_tty_ports);
@@ -288,33 +373,66 @@ static int gport_setup(struct usb_configuration *c)
 		ret = gsdio_setup(c->cdev->gadget, no_sdio_ports);
 	if (no_smd_ports)
 		ret = gsmd_setup(c->cdev->gadget, no_smd_ports);
+	if (no_hsic_sports) {
+		port_idx = ghsic_data_setup(no_hsic_sports, USB_GADGET_SERIAL);
+		if (port_idx < 0)
+			return port_idx;
 
+		for (i = 0; i < nr_ports; i++) {
+			if (gserial_ports[i].transport ==
+					USB_GADGET_XPORT_HSIC) {
+				gserial_ports[i].client_port_num = port_idx;
+				port_idx++;
+			}
+		}
+
+		/*clinet port num is same for data setup and ctrl setup*/
+		ret = ghsic_ctrl_setup(no_hsic_sports, USB_GADGET_SERIAL);
+		if (ret < 0)
+			return ret;
+		return 0;
+	}
 	return ret;
 }
 
 static int gport_connect(struct f_gser *gser)
 {
-	unsigned port_num;
-
-	pr_debug("%s: transport:%s f_gser:%p gserial:%p port_num:%d\n",
-			__func__, transport_to_str(gser->transport),
+	unsigned	port_num;
+	int		ret;
+	pr_debug("%s: transport: %s f_gser: %p gserial: %p port_num: %d\n",
+			__func__, xport_to_str(gser->transport),
 			gser, &gser->port, gser->port_num);
 
 	port_num = gserial_ports[gser->port_num].client_port_num;
 
 	switch (gser->transport) {
-	case USB_GADGET_FSERIAL_TRANSPORT_TTY:
+	case USB_GADGET_XPORT_TTY:
 		gserial_connect(&gser->port, port_num);
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SDIO:
+	case USB_GADGET_XPORT_SDIO:
 		gsdio_connect(&gser->port, port_num);
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SMD:
+	case USB_GADGET_XPORT_SMD:
 		gsmd_connect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_HSIC:
+		ret = ghsic_ctrl_connect(&gser->port, port_num);
+		if (ret) {
+			pr_err("%s: ghsic_ctrl_connect failed: err:%d\n",
+					__func__, ret);
+			return ret;
+		}
+		ret = ghsic_data_connect(&gser->port, port_num);
+		if (ret) {
+			pr_err("%s: ghsic_data_connect failed: err:%d\n",
+					__func__, ret);
+			ghsic_ctrl_disconnect(&gser->port, port_num);
+			return ret;
+		}
 		break;
 	default:
 		pr_err("%s: Un-supported transport: %s\n", __func__,
-				transport_to_str(gser->transport));
+				xport_to_str(gser->transport));
 		return -ENODEV;
 	}
 
@@ -325,25 +443,29 @@ static int gport_disconnect(struct f_gser *gser)
 {
 	unsigned port_num;
 
-	pr_debug("%s: transport:%s f_gser:%p gserial:%p port_num:%d\n",
-			__func__, transport_to_str(gser->transport),
+	pr_debug("%s: transport: %s f_gser: %p gserial: %p port_num: %d\n",
+			__func__, xport_to_str(gser->transport),
 			gser, &gser->port, gser->port_num);
 
 	port_num = gserial_ports[gser->port_num].client_port_num;
 
 	switch (gser->transport) {
-	case USB_GADGET_FSERIAL_TRANSPORT_TTY:
+	case USB_GADGET_XPORT_TTY:
 		gserial_disconnect(&gser->port);
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SDIO:
+	case USB_GADGET_XPORT_SDIO:
 		gsdio_disconnect(&gser->port, port_num);
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SMD:
+	case USB_GADGET_XPORT_SMD:
 		gsmd_disconnect(&gser->port, port_num);
+		break;
+	case USB_GADGET_XPORT_HSIC:
+		ghsic_ctrl_disconnect(&gser->port, port_num);
+		ghsic_data_disconnect(&gser->port, port_num);
 		break;
 	default:
 		pr_err("%s: Un-supported transport:%s\n", __func__,
-				transport_to_str(gser->transport));
+				xport_to_str(gser->transport));
 		return -ENODEV;
 	}
 
@@ -446,6 +568,21 @@ invalid:
 	return value;
 }
 #endif
+
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+static void gser_connect_work(struct work_struct *w)
+{
+	int ret = 0;
+	struct f_gser *gser = container_of(w, struct f_gser, connect_work.work);
+
+	if(gser->online) //tarial fix &gser->online -> gser->online
+		ret = gport_connect(gser);
+
+	if(ret == -ENODEV)
+		schedule_delayed_work(&gser->connect_work, msecs_to_jiffies(50));
+}
+#endif
+
 static int gser_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 {
 	struct f_gser		*gser = func_to_gser(f);
@@ -482,9 +619,16 @@ static int gser_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	gser->port.out_desc = ep_choose(cdev->gadget,
 			gser->hs.out, gser->fs.out);
 
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+	schedule_delayed_work(&gser->connect_work, msecs_to_jiffies(50));
+#else
 	gport_connect(gser);
-
+#endif
 	gser->online = 1;
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+	usb_interface_enum_cb(ACM_TYPE_FLAG);
+#endif
 	return rc;
 }
 
@@ -681,12 +825,43 @@ gser_bind(struct usb_configuration *c, struct usb_function *f)
 	struct usb_ep		*ep;
 
 	/* allocate instance-specific interface IDs */
+#if defined(CONFIG_ANDROID_PANTECH_USB)
+//	if((pantech_usb_carrier != CARRIER_QUALCOMM) && b_pantech_usb_module){
+	if(pantech_usb_carrier != CARRIER_QUALCOMM){
+		gser_fs_function = pantech_gser_fs_function;
+		gser_hs_function = pantech_gser_hs_function;
+
+		status = usb_interface_id(c, f);
+		if (status < 0)
+			goto fail;
+		gser->data_id = status; //data_id : cdc interface number
+		gser_acm_cdc_interface_desc.bInterfaceNumber = status;
+
+#if defined(FEATURE_ANDROID_PANTECH_USB_IAD)
+	gser_interface_assoc_desc.bFirstInterface = status;
+#endif
+		//acm interface
+		status = usb_interface_id(c, f);
+		if (status < 0)
+			goto fail;
+		gser_acm_data_interface_desc.bInterfaceNumber = status;
+	}else{
+		gser_fs_function = qualcomm_gser_fs_function;
+		gser_hs_function = qualcomm_gser_hs_function;
+
+		status = usb_interface_id(c, f);
+		if (status < 0)
+			goto fail;
+		gser->data_id = status;
+		gser_interface_desc.bInterfaceNumber = status;
+	}
+#else  
 	status = usb_interface_id(c, f);
 	if (status < 0)
 		goto fail;
 	gser->data_id = status;
 	gser_interface_desc.bInterfaceNumber = status;
-
+#endif
 	status = -ENODEV;
 
 	/* allocate instance-specific endpoints */
@@ -799,6 +974,11 @@ gser_unbind(struct usb_configuration *c, struct usb_function *f)
 #ifdef CONFIG_MODEM_SUPPORT
 	struct f_gser *gser = func_to_gser(f);
 #endif
+
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+	//tarial bug fix [execute work queue fail after changing usb mode]
+	cancel_delayed_work_sync(&gser->connect_work);
+#endif
 	if (gadget_is_dualspeed(c->cdev->gadget))
 		usb_free_descriptors(f->hs_descriptors);
 	usb_free_descriptors(f->descriptors);
@@ -871,6 +1051,10 @@ int gser_bind_config(struct usb_configuration *c, u8 port_num)
 	gser->port.send_break = gser_send_break;
 #endif
 
+#ifdef FEATURE_PANTECH_MODEM_REOPEN_DELAY
+	INIT_DELAYED_WORK(&gser->connect_work, gser_connect_work);
+#endif
+
 	status = usb_add_function(c, &gser->port.func);
 	if (status)
 		kfree(gser);
@@ -887,25 +1071,29 @@ static int gserial_init_port(int port_num, const char *name)
 	if (port_num >= GSERIAL_NO_PORTS)
 		return -ENODEV;
 
-	transport = serial_str_to_transport(name);
+	transport = str_to_xport(name);
 	pr_debug("%s, port:%d, transport:%s\n", __func__,
-				port_num, transport_to_str(transport));
+			port_num, xport_to_str(transport));
 
 	gserial_ports[port_num].transport = transport;
 	gserial_ports[port_num].port_num = port_num;
 
 	switch (transport) {
-	case USB_GADGET_FSERIAL_TRANSPORT_TTY:
+	case USB_GADGET_XPORT_TTY:
 		gserial_ports[port_num].client_port_num = no_tty_ports;
 		no_tty_ports++;
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SDIO:
+	case USB_GADGET_XPORT_SDIO:
 		gserial_ports[port_num].client_port_num = no_sdio_ports;
 		no_sdio_ports++;
 		break;
-	case USB_GADGET_FSERIAL_TRANSPORT_SMD:
+	case USB_GADGET_XPORT_SMD:
 		gserial_ports[port_num].client_port_num = no_smd_ports;
 		no_smd_ports++;
+		break;
+	case USB_GADGET_XPORT_HSIC:
+		/*client port number will be updated in gport_setup*/
+		no_hsic_sports++;
 		break;
 	default:
 		pr_err("%s: Un-supported transport transport: %u\n",

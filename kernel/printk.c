@@ -41,7 +41,7 @@
 #include <linux/cpu.h>
 #include <linux/notifier.h>
 #include <linux/rculist.h>
-
+#include <mach/msm_rtb.h>
 #include <asm/uaccess.h>
 
 /*
@@ -305,6 +305,13 @@ void log_buf_clear(void)
 {
 	logged_chars = 0;
 }
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+void* get_log_buf_addr(void)
+{
+	return (void*)log_buf;
+}
+#endif
 
 /*
  * Copy a range of characters from the log buffer.
@@ -784,6 +791,11 @@ asmlinkage int printk(const char *fmt, ...)
 {
 	va_list args;
 	int r;
+#ifdef CONFIG_MSM_RTB
+	void *caller = __builtin_return_address(0);
+
+	uncached_logk_pc(LOGK_LOGBUF, caller, (void *)log_end);
+#endif
 
 #ifdef CONFIG_KGDB_KDB
 	if (unlikely(kdb_trap_printk)) {
@@ -813,11 +825,6 @@ static volatile unsigned int printk_cpu = UINT_MAX;
  */
 static inline int can_use_console(unsigned int cpu)
 {
-#ifdef CONFIG_HOTPLUG_CPU
-	if (!cpu_active(cpu) && cpu_hotplug_inprogress())
-		return 0;
-#endif
-
 	return cpu_online(cpu) || have_callable_console();
 }
 
@@ -1653,7 +1660,7 @@ static int __init printk_late_init(void)
 	struct console *con;
 
 	for_each_console(con) {
-		if (con->flags & CON_BOOT) {
+		if (!keep_bootcon && con->flags & CON_BOOT) {
 			printk(KERN_INFO "turn off boot console %s%d\n",
 				con->name, con->index);
 			unregister_console(con);

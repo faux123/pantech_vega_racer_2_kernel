@@ -162,7 +162,7 @@ static struct usb_gadget_strings *acc_strings[] = {
 /* temporary variable used between acc_open() and acc_gadget_bind() */
 static struct acc_dev *_acc_dev;
 
-static inline struct acc_dev *func_to_dev(struct usb_function *f)
+static inline struct acc_dev *acc_func_to_dev(struct usb_function *f)
 {
 	return container_of(f, struct acc_dev, function);
 }
@@ -625,7 +625,7 @@ static int
 acc_function_bind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct usb_composite_dev *cdev = c->cdev;
-	struct acc_dev	*dev = func_to_dev(f);
+	struct acc_dev	*dev = acc_func_to_dev(f);
 	int			id;
 	int			ret;
 
@@ -662,7 +662,7 @@ acc_function_bind(struct usb_configuration *c, struct usb_function *f)
 static void
 acc_function_unbind(struct usb_configuration *c, struct usb_function *f)
 {
-	struct acc_dev	*dev = func_to_dev(f);
+	struct acc_dev	*dev = acc_func_to_dev(f);
 	struct usb_request *req;
 	int i;
 
@@ -681,7 +681,7 @@ static void acc_work(struct work_struct *data)
 static int acc_function_set_alt(struct usb_function *f,
 		unsigned intf, unsigned alt)
 {
-	struct acc_dev	*dev = func_to_dev(f);
+	struct acc_dev	*dev = acc_func_to_dev(f);
 	struct usb_composite_dev *cdev = f->config->cdev;
 	int ret;
 
@@ -705,12 +705,16 @@ static int acc_function_set_alt(struct usb_function *f,
 
 	/* readers may be blocked waiting for us to go online */
 	wake_up(&dev->read_wq);
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+	usb_interface_enum_cb(ACCESSORY_TYPE_FLAG);
+#endif
 	return 0;
 }
 
 static void acc_function_disable(struct usb_function *f)
 {
-	struct acc_dev	*dev = func_to_dev(f);
+	struct acc_dev	*dev = acc_func_to_dev(f);
 	struct usb_composite_dev	*cdev = dev->cdev;
 
 	DBG(cdev, "acc_function_disable\n");

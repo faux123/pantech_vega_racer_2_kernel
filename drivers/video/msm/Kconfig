@@ -146,6 +146,50 @@ config FB_MSM_LCDC_PANEL
 	select FB_MSM_LCDC
 	default n
 
+config FB_MSM_MIPI_DSI_ROHM
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
+config FB_MSM_MIPI_DSI_SONY
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+	
+config FB_MSM_MIPI_DSI_SAMSUNG_OCTA
+	bool
+	select FB_MSM_MIPI_DSI
+	default n	
+config FB_MSM_MIPI_DSI_HIMAX
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+	
+config FB_MSM_MIPI_DSI_ORTUS
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
+config FB_MSM_MIPI_DSI_SAMSUNG
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
+config FB_MSM_MIPI_DSI_SAMSUNG_OLED
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
+config FB_MSM_MIPI_DSI_SAMSUNG_OLED_PREMIA
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
+config FB_MSM_MIPI_DSI_LGD
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
 config FB_MSM_MIPI_DSI_TOSHIBA
 	bool
 	select FB_MSM_MIPI_DSI
@@ -247,12 +291,61 @@ config FB_MSM_LCDC_WXGA
 	select FB_MSM_LCDC_PANEL
 	default n
 
+config FB_MSM_MIPI_ROHM_VIDEO_HD
+	bool
+	select FB_MSM_MIPI_DSI_ROHM
+	default n
+
+config FB_MSM_MIPI_SONY_VIDEO_WXGA
+	bool
+	select FB_MSM_MIPI_DSI_SONY
+	default n
+	
+config FB_MSM_MIPI_SAMSUNG_OCTA_VIDEO_QHD
+	bool
+	select FB_MSM_MIPI_DSI_SAMSUNG_OCTA
+	default n
+	
+config FB_MSM_MIPI_HIMAX_VIDEO_WXGA
+	bool
+	select FB_MSM_MIPI_DSI_HIMAX
+	default n
+	
+config FB_MSM_MIPI_ORTUS_VIDEO_WXGA
+	bool
+	select FB_MSM_MIPI_DSI_ORTUS
+	default n
+config FB_MSM_MIPI_SAMSUNG_VIDEO_WSVGA
+	bool
+	select FB_MSM_MIPI_DSI_SAMSUNG
+	default n
+
+config FB_MSM_MIPI_SAMSUNG_OLED_VIDEO_WVGA
+	bool
+	select FB_MSM_MIPI_DSI_SAMSUNG_OLED
+	default n
+
+config FB_MSM_MIPI_SAMSUNG_OLED_VIDEO_HD
+	bool
+	select FB_MSM_MIPI_DSI_SAMSUNG_OLED_PREMIA
+	default n
+
+config FB_MSM_MIPI_LGD_VIDEO_WVGA
+	bool
+	select FB_MSM_MIPI_DSI_LGD
+	default n
+
 config FB_MSM_MIPI_TOSHIBA_VIDEO_WVGA_PT
 	bool
 	select FB_MSM_MIPI_DSI_TOSHIBA
 	default n
 
 config FB_MSM_MIPI_TOSHIBA_VIDEO_WSVGA_PT
+	bool
+	select FB_MSM_MIPI_DSI_TOSHIBA
+	default n
+
+config FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA
 	bool
 	select FB_MSM_MIPI_DSI_TOSHIBA
 	default n
@@ -295,12 +388,24 @@ config FB_MSM_MIPI_SIMULATOR_VIDEO
 	select FB_MSM_MIPI_DSI_SIMULATOR
 	default n
 
-config FB_MSM_OVERLAY_WRITEBACK
+config FB_MSM_OVERLAY0_WRITEBACK
 	depends on FB_MSM_OVERLAY
-        bool "MDP overlay write back mode enable"
+        bool "MDP overlay0 write back mode enable"
+	---help---
+	  Support for MDP4 OVERLAY0 write back mode
+
+
+config FB_MSM_OVERLAY1_WRITEBACK
+        depends on FB_MSM_OVERLAY
+        bool "MDP overlay1 write back mode enable"
+        ---help---
+          Support for MDP4 OVERLAY1 write back mode
+
+config FB_MSM_WRITEBACK_MSM_PANEL
+	depends on FB_MSM_OVERLAY
+        bool "MDP overlay write back panel enable"
 	---help---
 	  Support for MDP4 OVERLAY write back mode
-
 choice
 	prompt "LCD Panel"
 	default FB_MSM_MDDI_AUTO_DETECT
@@ -396,6 +501,7 @@ config FB_MSM_MIPI_PANEL_DETECT
 	bool "MIPI Panel Detect"
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WVGA_PT
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WSVGA_PT
+	select FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA
 	select FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT
 	select FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
 	select FB_MSM_MIPI_TRULY_VIDEO_WVGA_PT
@@ -470,6 +576,43 @@ config FB_MSM_MDDI_SHARP_QVGA_128x128
 	---help---
 	  Support for MDDI Sharp QVGA (240x320) and 128x128 dual panel
 
+config FB_MSM_MIPI_ROHM_VIDEO_HD_PANEL
+	bool "MIPI Rohm HD Panel"
+	select FB_MSM_MIPI_ROHM_VIDEO_HD
+
+config FB_MSM_MIPI_SONY_VIDEO_WXGA_PANEL
+	bool "MIPI Sony WXGA Panel"
+	select FB_MSM_MIPI_SONY_VIDEO_WXGA
+	
+config FB_MSM_MIPI_SAMSUNG_OCTA_VIDEO_QHD_PANEL
+	bool "MIPI Samsung Octa QHD Panel"
+	select FB_MSM_MIPI_SAMSUNG_OCTA_VIDEO_QHD
+	
+config FB_MSM_MIPI_HIMAX_VIDEO_WXGA_PANEL
+	bool "MIPI HIMAX WXGA Panel"
+	select FB_MSM_MIPI_HIMAX_VIDEO_WXGA
+	
+	
+config FB_MSM_MIPI_ORTUS_VIDEO_WXGA_PANEL
+	bool "MIPI ORTUS WXGA Panel(EF46L)"
+	select FB_MSM_MIPI_ORTUS_VIDEO_WXGA
+
+config FB_MSM_MIPI_SAMSUNG_OLED_VIDEO_WVGA_PANEL
+	bool "MIPI Samsung OLED WVGA Panel(Cheetah)"
+	select FB_MSM_MIPI_SAMSUNG_OLED_VIDEO_WVGA
+
+config FB_MSM_MIPI_SAMSUNG_OLED_PREMIA_VIDEO_HD_PANEL
+	bool "MIPI Samsung OLED HD Panel(Vega Premia_VZW)"
+	select FB_MSM_MIPI_SAMSUNG_OLED_VIDEO_HD
+
+config FB_MSM_MIPI_LGD_VIDEO_WVGA_PANEL
+	bool "MIPI LGD WVGA Panel(StarQ)"
+	select FB_MSM_MIPI_LGD_VIDEO_WVGA
+
+config FB_MSM_MIPI_SAMSUNG_VIDEO_WSVGA_PANEL
+	bool "MIPI Samsung WSVGA Panel"
+	select FB_MSM_MIPI_SAMSUNG_VIDEO_WSVGA
+
 config FB_MSM_MIPI_TOSHIBA_VIDEO_WVGA_PT_PANEL
 	bool "MIPI Toshiba WVGA PT Panel"
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WVGA_PT
@@ -477,6 +620,10 @@ config FB_MSM_MIPI_TOSHIBA_VIDEO_WVGA_PT_PANEL
 config FB_MSM_MIPI_TOSHIBA_VIDEO_WSVGA_PT_PANEL
 	bool "MIPI Toshiba WSVGA PT Panel"
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WSVGA_PT
+
+config FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA_PANEL
+	bool "MIPI Toshiba WUXGA (1920x1200) Panel"
+	select FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA
 
 config FB_MSM_MIPI_NOVATEK_VIDEO_QHD_PT_PANEL
 	bool "MIPI NOVATEK VIDEO QHD PT Panel"
@@ -513,6 +660,7 @@ config FB_MSM_EBI2_TMD_QVGA_EPSON_QCIF
 	  Support for EBI2 TMD QVGA (240x320) and Epson QCIF (176x220) panel
 
 config FB_MSM_HDMI_AS_PRIMARY
+	depends on FB_MSM_HDMI_COMMON
 	bool "Use HDMI as primary panel"
 	---help---
 	Support for using HDMI as primary
@@ -623,6 +771,105 @@ config FB_MSM_HDMI_MSM_PANEL_CEC_SUPPORT
 	  Support for HDMI CEC Feature
 	  Choose to enable CEC
 
+config FB_MSM_HDMI_MHL
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool 'HDMI to MHL support'
+	default n
+	---help---
+	  Support the HDMI to MHL conversion.
+	  MHL (Mobile High-Definition Link) technology
+	  uses USB connector to output HDMI content
+
+config PANTECH_DONOT_POWER_ON_HDMI_AT_FB_OPEN
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use DONOT_POWER_ON_HDMI_AT_FB_OPEN"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_F_HDMI_NOTIFY_POWER_ON
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use F_HDMI_NOTIFY_POWER_ON"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_F_SCHEDULE_CHK_HDMI_HPD
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use F_SCHEDULE_CHK_HDMI_HPD"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_F_HDMI_DUMMY_PW_CTRL
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use F_HDMI_DUMMY_PW_CTRL"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_F_HDMI_PW_CTRL_ON_LCD
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use PANTECH_HDMI_PW_CTRL_ON_LCD"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_HDMI_LOOKS_BLACK
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use PANTECH_HDMI_PW_CTRL_ON_LCD"
+	default n
+	---help---
+	  Support for HDMI control
+config F_SKYDISP_HDMI_BLOCK
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "Use F_SKYDISP_HDMI_BLOCK"
+	default n
+	---help---
+	  Support for HDMI control
+config PANTECH_FB_MSM_MHL_SII9244
+	depends on FB_MSM_HDMI_MSM_PANEL
+	bool "MHL SII9244"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config PANTECH_MHL_CABLE_DETECT
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "MHL_CABLE_DETECT"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config PANTECH_FORMAT_FOR_MHL_LIMIT
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "FORMAT_FOR_MHL_LIMIT"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config PANTECH_MHL_I2C_CONTROL
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "MHL_I2C_CONTROL"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config PANTECH_MHL_SUSPEND_RESUME
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "CONFIG_PANTECH_MHL_SUSPEND_RESUME"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config PANTECH_MHL_VCC_3P3
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "CONFIG_PANTECH_MHL_VCC_3P3"
+	default n
+	---help---
+	  Support for MHL_SII9244
+config QUALCOMM_FIX_TMDS_OUT
+	depends on PANTECH_FB_MSM_MHL_SII9244
+	bool "QUALCOMM_FIX_TMDS_OUT"
+	default n
+	---help---
+	  Support for MHL_SII9244	  	  
+config QUALCOMM_FIX_TMDS_OUT
+	depends on QUALCOMM_FIX_TMDS_OUT
+	bool "QUALCOMM_FIX_TMDS_OUT"
+	default n
+	---help---
+	  Support for MHL_SII9244	  	  
 choice
 	depends on  (FB_MSM_MDP22 || FB_MSM_MDP31 || FB_MSM_MDP40)
 	prompt "TVOut Region"

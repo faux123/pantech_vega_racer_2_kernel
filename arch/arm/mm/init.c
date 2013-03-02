@@ -121,7 +121,14 @@ void show_mem(unsigned int filter)
 			else
 				shared += page_count(page) - 1;
 			page++;
+#ifdef CONFIG_SPARSEMEM
+			pfn1++;
+			if (!(pfn1 % PAGES_PER_SECTION))
+				page = pfn_to_page(pfn1);
+		} while (pfn1 < pfn2);
+#else
 		} while (page < end);
+#endif
 	}
 
 	printk("%d pages of RAM\n", total);
@@ -322,11 +329,12 @@ static void arm_memory_present(void)
 #else
 static void arm_memory_present(void)
 {
-	struct memblock_region *reg;
-
-	for_each_memblock(memory, reg)
-		memory_present(0, memblock_region_memory_base_pfn(reg),
-			       memblock_region_memory_end_pfn(reg));
+	struct meminfo *mi = &meminfo;
+	int i;
+	for_each_bank(i, mi) {
+		memory_present(0, bank_pfn_start(&mi->bank[i]),
+				bank_pfn_end(&mi->bank[i]));
+	}
 }
 #endif
 
@@ -342,22 +350,30 @@ unsigned long membank0_size;
 EXPORT_SYMBOL(membank0_size);
 unsigned long membank1_start;
 EXPORT_SYMBOL(membank1_start);
+
+void __init find_membank0_hole(void)
+{
+	sort(&meminfo.bank, meminfo.nr_banks,
+		sizeof(meminfo.bank[0]), meminfo_cmp, NULL);
+
+	membank0_size = meminfo.bank[0].size;
+	membank1_start = meminfo.bank[1].start;
+
+	pr_info("m0 size %lx m1 start %lx\n", membank0_size, membank1_start);
+}
 #endif
 
 void __init arm_memblock_init(struct meminfo *mi, struct machine_desc *mdesc)
 {
 	int i;
 
+#ifndef CONFIG_DONT_MAP_HOLE_AFTER_MEMBANK0
 	sort(&meminfo.bank, meminfo.nr_banks, sizeof(meminfo.bank[0]), meminfo_cmp, NULL);
+#endif
 
 	memblock_init();
 	for (i = 0; i < mi->nr_banks; i++)
 		memblock_add(mi->bank[i].start, mi->bank[i].size);
-
-#ifdef CONFIG_DONT_MAP_HOLE_AFTER_MEMBANK0
-	membank0_size = meminfo.bank[0].size;
-	membank1_start = meminfo.bank[1].start;
-#endif
 
 	/* Register the kernel text, kernel data and initrd with memblock. */
 #ifdef CONFIG_XIP_KERNEL
@@ -484,6 +500,17 @@ static inline int free_area(unsigned long pfn, unsigned long end, char *s)
 	return pages;
 }
 
+/*
+ * Poison init memory with an undefined instruction (ARM) or a branch to an
+ * undefined instruction (Thumb).
+ */
+static inline void poison_init_mem(void *s, size_t count)
+{
+	u32 *p = (u32 *)s;
+	for (; count != 0; count -= 4)
+		*p++ = 0xe7fddef0;
+}
+
 static inline void
 free_memmap(unsigned long start_pfn, unsigned long end_pfn)
 {
@@ -539,6 +566,13 @@ static void __init free_unused_memmap(struct meminfo *mi)
 		 */
 		bank_start = min(bank_start,
 				 ALIGN(prev_bank_end, PAGES_PER_SECTION));
+#else
+		/*
+		 * Align down here since the VM subsystem insists that the
+		 * memmap entries are valid from the bank start aligned to
+		 * MAX_ORDER_NR_PAGES.
+		 */
+		bank_start = round_down(bank_start, MAX_ORDER_NR_PAGES);
 #endif
 		/*
 		 * If we had a previous bank, and there is a space
@@ -623,6 +657,9 @@ void __init mem_init(void)
 	extern u32 dtcm_end;
 	extern u32 itcm_end;
 #endif
+#ifdef CONFIG_FIX_MOVABLE_ZONE
+	struct zone *zone;
+#endif
 
 	max_mapnr   = pfn_to_page(max_pfn + PHYS_PFN_OFFSET) - mem_map;
 
@@ -667,6 +704,14 @@ void __init mem_init(void)
 		} while (page < end);
 #endif
 	}
+
+#ifdef CONFIG_FIX_MOVABLE_ZONE
+	for_each_zone(zone) {
+		if (zone_idx(zone) == ZONE_MOVABLE)
+			total_unmovable_pages = totalram_pages -
+							zone->spanned_pages;
+	}
+#endif
 
 	/*
 	 * Since our memory may not be contiguous, calculate the
@@ -770,25 +815,35 @@ void __init mem_init(void)
 
 void free_initmem(void)
 {
+	unsigned long reclaimed_initmem;
 #ifdef CONFIG_HAVE_TCM
 	extern char __tcm_start, __tcm_end;
 
+	poison_init_mem(&__tcm_start, &__tcm_end - &__tcm_start);
 	totalram_pages += free_area(__phys_to_pfn(__pa(&__tcm_start)),
 				    __phys_to_pfn(__pa(&__tcm_end)),
 				    "TCM link");
 #endif
 
-	if (!machine_is_integrator() && !machine_is_cintegrator())
-		totalram_pages += free_area(__phys_to_pfn(__pa(__init_begin)),
+	if (!machine_is_integrator() && !machine_is_cintegrator()) {
+		poison_init_mem(__init_begin, __init_end - __init_begin);
+		reclaimed_initmem = free_area(__phys_to_pfn(__pa(__init_begin)),
 					    __phys_to_pfn(__pa(__init_end)),
 					    "init");
+		totalram_pages += reclaimed_initmem;
+#ifdef CONFIG_FIX_MOVABLE_ZONE
+		total_unmovable_pages += reclaimed_initmem;
+#endif
+	}
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
 int arch_add_memory(int nid, u64 start, u64 size)
 {
 	struct pglist_data *pgdata = NODE_DATA(nid);
-	struct zone *zone = pgdata->node_zones + ZONE_MOVABLE;
+	/* 20120302 LS1-JHM : rollback, ZONE_NORMAL -> ZONE_MOVABLE */
+	struct zone *zone = pgdata->node_zones + ZONE_MOVABLE; //ZONE_NORMAL;
+	/* 20120213 jylee, ef18/ef30 no remove memory struct zone *zone = pgdata->node_zones + ZONE_MOVABLE;*/
 	unsigned long start_pfn = start >> PAGE_SHIFT;
 	unsigned long nr_pages = size >> PAGE_SHIFT;
 
@@ -817,10 +872,17 @@ static int keep_initrd;
 
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
-	if (!keep_initrd)
-		totalram_pages += free_area(__phys_to_pfn(__pa(start)),
+	unsigned long reclaimed_initrd_mem;
+	if (!keep_initrd) {
+		poison_init_mem((void *)start, PAGE_ALIGN(end) - start);
+		reclaimed_initrd_mem = free_area(__phys_to_pfn(__pa(start)),
 					    __phys_to_pfn(__pa(end)),
 					    "initrd");
+		totalram_pages += reclaimed_initrd_mem;
+#ifdef CONFIG_FIX_MOVABLE_ZONE
+		total_unmovable_pages += reclaimed_initrd_mem;
+#endif
+	}
 }
 
 static int __init keepinitrd_setup(char *__unused)

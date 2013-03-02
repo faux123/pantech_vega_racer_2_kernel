@@ -185,6 +185,18 @@ static void initcall_debug_report(struct device *dev, ktime_t calltime,
 		pr_info("call %s+ returned %d after %Ld usecs\n", dev_name(dev),
 			error, (unsigned long long)ktime_to_ns(delta) >> 10);
 	}
+	
+	if(error != 0){
+		if(dev && dev->driver){
+			printk(KERN_ERR "platform_pm : driver %s, mod_name %s, owner %s, returns %d\n", 
+				dev->driver->name?dev->driver->name:"None",
+				dev->driver->mod_name?dev->driver->mod_name:"None",
+				dev->driver->owner?dev->driver->owner->name:"None",
+				error);
+		}else{
+			printk(KERN_ERR "[JHM] driver is NULL\n");
+		}
+	}
 }
 
 /**

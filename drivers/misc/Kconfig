@@ -233,13 +233,6 @@ config ENCLOSURE_SERVICES
 	  driver (SCSI/ATA) which supports enclosures
 	  or a SCSI enclosure device (SES) to use these services.
 
-config KERNEL_DEBUGGER_CORE
-	bool "Kernel Debugger Core"
-	default n
-	---help---
-	  Generic kernel debugging command processor used by low level
-	  (interrupt context) platform-specific debuggers.
-
 config SGI_XP
 	tristate "Support communication between SGI SSIs"
 	depends on NET
@@ -568,6 +561,14 @@ config TSIF_DEBUG
 	---help---
 	  This turns on debugging information for the tsif driver
 
+config TSPP
+	depends on ARCH_MSM
+	tristate "TSPP (Transport Stream Packet Processor) Support"
+	---help---
+	Transport Stream Packet Processor is used to offload the
+	processing of MPEG transport streams from the main processor.
+	This can also be compiled as a loadable module.
+
 config HAPTIC_ISA1200
 	tristate "ISA1200 haptic support"
 	depends on I2C
@@ -585,14 +586,6 @@ config PMIC8058_PWM
 	  purposes including software controlled brightness of backlight,
 	  motor control, and waveform generation.
 
-config PMIC8058_VIBRATOR
-	tristate "Qualcomm PM8058 vibrator support"
-	depends on PMIC8058 && ANDROID_TIMED_OUTPUT
-	default n
-	help
-	  This option enables device driver support for the vibrator
-	  on Qualcomm PM8058 chip.
-
 config PMIC8XXX_VIBRATOR
 	tristate "Qualcomm Vibrator support for PMIC8XXX"
 	depends on MFD_PM8XXX && ANDROID_TIMED_OUTPUT
@@ -601,21 +594,19 @@ config PMIC8XXX_VIBRATOR
 	  on the PM8XXX chips. The vibrator is controlled using the
 	  timed output class.
 
-config PMIC8058_NFC
-	tristate "Qualcomm PM8058 support for Near Field Communication"
-	depends on PMIC8058
-	default y
+config PMIC8XXX_NFC
+	tristate "Qualcomm PM8XXX support for Near Field Communication"
+	depends on MFD_PM8XXX
 	help
-	  Qualcomm PM8058 chip has a module to support NFC (Near Field
+	  Qualcomm PM8XXX chips have a module to support NFC (Near Field
 	  Communication). This option enables the driver to support it.
 
-config PMIC8058_UPL
-	tristate "Qualcomm PM8058 support for User Programmable Logic"
-	depends on PMIC8058
-	default n
+config PMIC8XXX_UPL
+	tristate "Qualcomm PM8XXX support for User Programmable Logic"
+	depends on MFD_PM8XXX
 	help
 	  This option enables device driver support for User Programmable Logic
-	  on Qualcomm PM8058 chip.  The UPL module provides a means to implement
+	  on Qualcomm PM8XXX chips. The UPL module provides a means to implement
 	  simple truth table based logic via a set of control registers. I/O may
 	  be routed in and out of the UPL module via GPIO or DTEST pins.
 
@@ -628,29 +619,19 @@ config PMIC8058_XOADC
 	  PMIC8058. Driver interface to program registers of the ADC over
 	  AMUX channels, devices on programmable MPP's and xotherm.
 
-config PMIC8058_MISC
-	tristate "Qualcomm PM8058 Misc Device driver"
-	depends on PMIC8058
-	default n
-	help
-	  Provides functionality for various small drivers utilizing the
-	  Qualcomm PM8058 chip.  Examples include: signalling when the 32kHz
-	  oscillator malfunctions.
-
-config PMIC8058_BATTALARM
-	tristate "Qualcomm PM8058 Battery Alarm Device driver"
-	depends on PMIC8058
-	help
-	  This option enables support for the battery alarm module on the
-	  Qualcomm PM8058 PMIC chip.  This support allows for configuration of
-	  the alarm module as well as interrupt handling.
-
 config TZCOM
 	tristate "Trustzone Communicator driver"
 	default n
 	help
 	  Provides a communication interface between userspace and
 	  TrustZone Operating Environment (TZBSP) using Secure Channel
+	  Manager (SCM) interface.
+
+config QSEECOM
+	tristate "Qualcomm Secure Execution Communicator driver"
+	help
+	  Provides a communication interface between userspace and
+	  Qualcomm Secure Execution Environment (QSEE) using Secure Channel
 	  Manager (SCM) interface.
 
 config QFP_FUSE
@@ -661,6 +642,13 @@ config QFP_FUSE
 	  to the fuse block. Currently this is supported only
 	  on FSM targets.
 
+config PN544
+	bool "NXP PN544 NFC Controller Driver"
+	depends on I2C && ( MACH_MSM8960_CHEETAH || MACH_MSM8960_EF44S || MACH_MSM8960_EF45K || MACH_MSM8960_EF47S || MACH_MSM8960_EF46L || MACH_MSM8960_VEGAPVW )
+	default y
+	help
+	  NXP PN544 Near Field Communication controller support.
+	  
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
@@ -668,5 +656,6 @@ source "drivers/misc/iwmc3200top/Kconfig"
 source "drivers/misc/ti-st/Kconfig"
 source "drivers/misc/lis3lv02d/Kconfig"
 source "drivers/misc/carma/Kconfig"
+source "drivers/misc/felica/Kconfig"  
 
 endif # MISC_DEVICES

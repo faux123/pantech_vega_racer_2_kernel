@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -791,7 +791,7 @@ static int voice_send_cvs_cal_to_modem(struct voice_data *v)
 	struct apr_hdr cvs_cal_cmd_hdr;
 	uint32_t *cmd_buf;
 	struct acdb_cal_data cal_data;
-	struct acdb_cal_block *cal_blk;
+	struct acdb_atomic_cal_block *cal_blk;
 	int32_t cal_size_per_network;
 	uint32_t *cal_data_per_network;
 	int index = 0;
@@ -830,11 +830,12 @@ static int voice_send_cvs_cal_to_modem(struct voice_data *v)
 	pr_debug("cal_blk =%x\n", (uint32_t)cal_data.cal_blocks);
 
 	for (; index < cal_data.num_cal_blocks; index++) {
-		cal_size_per_network = cal_blk[index].cal_size;
+		cal_size_per_network = atomic_read(&cal_blk[index].cal_size);
 		pr_debug(" cal size =%d\n", cal_size_per_network);
 		if (cal_size_per_network >= BUFFER_PAYLOAD_SIZE)
 			pr_err("Cal size is too big\n");
-		cal_data_per_network = (u32 *)cal_blk[index].cal_kvaddr;
+		cal_data_per_network =
+			(u32 *)atomic_read(&cal_blk[index].cal_kvaddr);
 		pr_debug(" cal data=%x\n", (uint32_t)cal_data_per_network);
 		cvs_cal_cmd_hdr.pkt_size = APR_PKT_SIZE(APR_HDR_SIZE,
 			cal_size_per_network);
@@ -868,7 +869,7 @@ static int voice_send_cvp_cal_to_modem(struct voice_data *v)
 	struct apr_hdr cvp_cal_cmd_hdr;
 	uint32_t *cmd_buf;
 	struct acdb_cal_data cal_data;
-	struct acdb_cal_block *cal_blk;
+	struct acdb_atomic_cal_block *cal_blk;
 	int32_t cal_size_per_network;
 	uint32_t *cal_data_per_network;
 	int index = 0;
@@ -907,11 +908,12 @@ static int voice_send_cvp_cal_to_modem(struct voice_data *v)
 	pr_debug(" cal_blk =%x\n", (uint32_t)cal_data.cal_blocks);
 
 	for (; index < cal_data.num_cal_blocks; index++) {
-		cal_size_per_network = cal_blk[index].cal_size;
+		cal_size_per_network = atomic_read(&cal_blk[index].cal_size);
 		if (cal_size_per_network >= BUFFER_PAYLOAD_SIZE)
 			pr_err("Cal size is too big\n");
 		pr_debug(" cal size =%d\n", cal_size_per_network);
-		cal_data_per_network = (u32 *)cal_blk[index].cal_kvaddr;
+		cal_data_per_network =
+			(u32 *)atomic_read(&cal_blk[index].cal_kvaddr);
 		pr_debug(" cal data=%x\n", (uint32_t)cal_data_per_network);
 
 		cvp_cal_cmd_hdr.pkt_size = APR_PKT_SIZE(APR_HDR_SIZE,
@@ -945,11 +947,9 @@ static int voice_send_cvp_vol_tbl_to_modem(struct voice_data *v)
 	struct apr_hdr cvp_vol_cal_cmd_hdr;
 	uint32_t *cmd_buf;
 	struct acdb_cal_data cal_data;
-	struct acdb_cal_block *cal_blk;
+	struct acdb_atomic_cal_block *cal_blk;
 	int32_t cal_size_per_network;
 	uint32_t *cal_data_per_network;
-	uint32_t num_volume_steps;
-	int offset = 0;
 	int index = 0;
 	int ret = 0;
 	void *apr_cvp = voice_get_apr_cvp();
@@ -986,27 +986,18 @@ static int voice_send_cvp_vol_tbl_to_modem(struct voice_data *v)
 	pr_debug("Cal_blk =%x\n", (uint32_t)cal_data.cal_blocks);
 
 	for (; index < cal_data.num_cal_blocks; index++) {
-		cal_size_per_network = cal_blk[index].cal_size;
-		cal_data_per_network = (u32 *)cal_blk[index].cal_kvaddr;
-
-		/* Number of volume steps are only included in the */
-		/* first block, need to be inserted into the rest */
-		if (index != 0) {
-			offset = sizeof(num_volume_steps);
-			memcpy(cmd_buf + (APR_HDR_SIZE / sizeof(uint32_t)),
-				&num_volume_steps, offset);
-		} else {
-			num_volume_steps = *cal_data_per_network;
-		}
+		cal_size_per_network = atomic_read(&cal_blk[index].cal_size);
+		cal_data_per_network =
+			(u32 *)atomic_read(&cal_blk[index].cal_kvaddr);
 
 		pr_debug("Cal size =%d, index=%d\n", cal_size_per_network,
 			index);
 		pr_debug("Cal data=%x\n", (uint32_t)cal_data_per_network);
 		cvp_vol_cal_cmd_hdr.pkt_size = APR_PKT_SIZE(APR_HDR_SIZE,
-			cal_size_per_network + offset);
+			cal_size_per_network);
 		memcpy(cmd_buf, &cvp_vol_cal_cmd_hdr,  APR_HDR_SIZE);
-		memcpy(cmd_buf + (APR_HDR_SIZE / sizeof(uint32_t)) +
-			offset, cal_data_per_network, cal_size_per_network);
+		memcpy(cmd_buf + (APR_HDR_SIZE / sizeof(uint32_t)),
+			cal_data_per_network, cal_size_per_network);
 		pr_debug("Send vol table\n");
 
 		v->cvp_state = CMD_STATUS_FAIL;
@@ -1117,10 +1108,13 @@ static int voice_config_cvs_vocoder(struct voice_data *v)
 
 	/* Set encoder properties. */
 	switch (common.mvs_info.media_type) {
+	case VSS_MEDIA_ID_13K_MODEM:
+	case VSS_MEDIA_ID_4GV_NB_MODEM:
+	case VSS_MEDIA_ID_4GV_WB_MODEM:
 	case VSS_MEDIA_ID_EVRC_MODEM: {
 		struct cvs_set_cdma_enc_minmax_rate_cmd cvs_set_cdma_rate;
 
-		pr_info("%s: Setting EVRC min-max rate\n", __func__);
+		pr_info("%s: Setting CDMA min-max rate\n", __func__);
 
 		cvs_set_cdma_rate.hdr.hdr_field =
 				APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
@@ -1133,14 +1127,16 @@ static int voice_config_cvs_vocoder(struct voice_data *v)
 		cvs_set_cdma_rate.hdr.token = 0;
 		cvs_set_cdma_rate.hdr.opcode =
 				VSS_ISTREAM_CMD_CDMA_SET_ENC_MINMAX_RATE;
-		cvs_set_cdma_rate.cdma_rate.min_rate = common.mvs_info.rate;
-		cvs_set_cdma_rate.cdma_rate.max_rate = common.mvs_info.rate;
+		cvs_set_cdma_rate.cdma_rate.min_rate =
+				common.mvs_info.q_min_max_rate.min_rate;
+		cvs_set_cdma_rate.cdma_rate.max_rate =
+				common.mvs_info.q_min_max_rate.max_rate;
 
 		v->cvs_state = CMD_STATUS_FAIL;
 
 		ret = apr_send_pkt(apr_cvs, (uint32_t *) &cvs_set_cdma_rate);
 		if (ret < 0) {
-			pr_err("%s: Error %d sending SET_EVRC_MINMAX_RATE\n",
+			pr_err("%s: Error %d sending CDMA_SET_ENC_MINMAX_RATE\n",
 			       __func__, ret);
 
 			goto done;
@@ -1155,6 +1151,10 @@ static int voice_config_cvs_vocoder(struct voice_data *v)
 			ret = -EINVAL;
 			goto done;
 		}
+
+		if ((common.mvs_info.media_type == VSS_MEDIA_ID_4GV_NB_MODEM) ||
+		(common.mvs_info.media_type == VSS_MEDIA_ID_4GV_WB_MODEM))
+			ret = voice_set_dtx(v);
 
 		break;
 	}
@@ -1245,6 +1245,9 @@ static int voice_config_cvs_vocoder(struct voice_data *v)
 		break;
 	}
 
+	case VSS_MEDIA_ID_EFR_MODEM:
+	case VSS_MEDIA_ID_FR_MODEM:
+	case VSS_MEDIA_ID_HR_MODEM:
 	case VSS_MEDIA_ID_G729:
 	case VSS_MEDIA_ID_G711_ALAW:
 	case VSS_MEDIA_ID_G711_MULAW: {
@@ -2472,12 +2475,14 @@ void voice_register_mvs_cb(ul_cb_fn ul_cb,
 void voice_config_vocoder(uint32_t media_type,
 			  uint32_t rate,
 			  uint32_t network_type,
-			  uint32_t dtx_mode)
+			  uint32_t dtx_mode,
+			  struct q_min_max_rate q_min_max_rate)
 {
 	common.mvs_info.media_type = media_type;
 	common.mvs_info.rate = rate;
 	common.mvs_info.network_type = network_type;
 	common.mvs_info.dtx_mode = dtx_mode;
+	common.mvs_info.q_min_max_rate = q_min_max_rate;
 }
 
 static int32_t modem_mvm_callback(struct apr_client_data *data, void *priv)
@@ -2488,17 +2493,6 @@ static int32_t modem_mvm_callback(struct apr_client_data *data, void *priv)
 	int i = 0;
 
 	pr_debug("%s: session_id 0x%x\n", __func__, data->dest_port);
-
-	v = voice_get_session(data->dest_port);
-	if (v == NULL) {
-		pr_err("%s: v is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	pr_debug("%s: common data 0x%x, session 0x%x\n",
-		 __func__, (unsigned int)c, (unsigned int)v);
-	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
-				data->payload_size, data->opcode);
 
 	if (data->opcode == RESET_EVENTS) {
 		pr_debug("%s:Reset event received in Voice service\n",
@@ -2514,6 +2508,17 @@ static int32_t modem_mvm_callback(struct apr_client_data *data, void *priv)
 
 		return 0;
 	}
+
+	v = voice_get_session(data->dest_port);
+	if (v == NULL) {
+		pr_err("%s: v is NULL\n", __func__);
+		return -EINVAL;
+	}
+
+	pr_debug("%s: common data 0x%x, session 0x%x\n",
+		 __func__, (unsigned int)c, (unsigned int)v);
+	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
+				data->payload_size, data->opcode);
 
 	if (data->opcode == APR_BASIC_RSP_RESULT) {
 		if (data->payload_size) {
@@ -2604,17 +2609,6 @@ static int32_t modem_cvs_callback(struct apr_client_data *data, void *priv)
 
 	pr_debug("%s: session_id 0x%x\n", __func__, data->dest_port);
 
-	v = voice_get_session(data->dest_port);
-	if (v == NULL) {
-		pr_err("%s: v is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	pr_debug("%s: common data 0x%x, session 0x%x\n",
-		 __func__, (unsigned int)c, (unsigned int)v);
-	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
-					data->payload_size, data->opcode);
-
 	if (data->opcode == RESET_EVENTS) {
 		pr_debug("%s:Reset event received in Voice service\n",
 					__func__);
@@ -2629,6 +2623,17 @@ static int32_t modem_cvs_callback(struct apr_client_data *data, void *priv)
 
 		return 0;
 	}
+
+	v = voice_get_session(data->dest_port);
+	if (v == NULL) {
+		pr_err("%s: v is NULL\n", __func__);
+		return -EINVAL;
+	}
+
+	pr_debug("%s: common data 0x%x, session 0x%x\n",
+		 __func__, (unsigned int)c, (unsigned int)v);
+	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
+					data->payload_size, data->opcode);
 
 	if (data->opcode == APR_BASIC_RSP_RESULT) {
 		if (data->payload_size) {
@@ -2802,17 +2807,6 @@ static int32_t modem_cvp_callback(struct apr_client_data *data, void *priv)
 
 	pr_debug("%s: session_id 0x%x\n", __func__, data->dest_port);
 
-	v = voice_get_session(data->dest_port);
-	if (v == NULL) {
-		pr_err("%s: v is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	pr_debug("%s: common data 0x%x, session 0x%x\n",
-		 __func__, (unsigned int)c, (unsigned int)v);
-	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
-				data->payload_size, data->opcode);
-
 	if (data->opcode == RESET_EVENTS) {
 		pr_debug("%s:Reset event received in Voice service\n",
 					__func__);
@@ -2827,6 +2821,17 @@ static int32_t modem_cvp_callback(struct apr_client_data *data, void *priv)
 
 		return 0;
 	}
+
+	v = voice_get_session(data->dest_port);
+	if (v == NULL) {
+		pr_err("%s: v is NULL\n", __func__);
+		return -EINVAL;
+	}
+
+	pr_debug("%s: common data 0x%x, session 0x%x\n",
+		 __func__, (unsigned int)c, (unsigned int)v);
+	pr_debug("%s: Payload Length = %d, opcode=%x\n", __func__,
+				data->payload_size, data->opcode);
 
 	if (data->opcode == APR_BASIC_RSP_RESULT) {
 		if (data->payload_size) {

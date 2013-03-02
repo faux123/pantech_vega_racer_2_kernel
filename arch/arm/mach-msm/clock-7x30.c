@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -68,7 +68,6 @@
 #define MI2S_NS_REG		REG(0x02E0)
 #define MI2S_RX_NS_REG		REG(0x0070)
 #define MI2S_TX_NS_REG		REG(0x0078)
-#define MIDI_NS_REG		REG(0x02D0)
 #define PLL_ENA_REG		REG(0x0264)
 #define PMDH_NS_REG		REG(0x008C)
 #define SDAC_NS_REG		REG(0x009C)
@@ -1693,34 +1692,6 @@ static struct branch_clk mi2s_s_clk = {
 	},
 };
 
-static struct clk_freq_tbl clk_tbl_midi[] = {
-	F_MND8(       0,  0,  0, gnd,  1,  0,  0),
-	F_MND8(98304000, 19, 12, pll3, 3,  2,  5),
-	F_END,
-};
-
-static struct rcg_clk midi_clk = {
-	.b = {
-		.ctl_reg = MIDI_NS_REG,
-		.en_mask = BIT(9),
-		.halt_reg = CLK_HALT_STATEC_REG,
-		.halt_bit = 1,
-	},
-	.ns_reg = MIDI_NS_REG,
-	.md_reg = MIDI_NS_REG - 4,
-	.ns_mask = F_MASK_MND8(19, 12),
-	.root_en_mask = BIT(11),
-	.freq_tbl = clk_tbl_midi,
-	.current_freq = &rcg_dummy_freq,
-	.set_rate = set_rate_mnd,
-	.c = {
-		.dbg_name = "midi_clk",
-		.ops = &clk_ops_rcg_7x30,
-		VDD_DIG_FMAX_MAP1(NOMINAL, 98304000),
-		CLK_INIT(midi_clk.c),
-	},
-};
-
 #define F_SDAC(f, s, div, m, n) \
 	{ \
 		.freq_hz = f, \
@@ -2234,6 +2205,7 @@ static struct branch_clk mfc_div2_clk = {
 static struct clk_freq_tbl clk_tbl_spi[] = {
 	F_MND8(       0,  0,  0, gnd,  1,   0,     0),
 	F_MND8( 9963243, 19, 12, pll3, 4,   2,    37),
+	F_MND8(24576000, 19, 12, lpxo, 1,   0,     0),
 	F_MND8(26331429, 19, 12, pll3, 4,   1,     7),
 	F_END,
 };
@@ -2344,7 +2316,7 @@ static DEFINE_CLK_PCOM(usb_phy_clk, USB_PHY_CLK, CLKFLAG_MIN);
 static DEFINE_CLK_PCOM(p_grp_2d_clk, GRP_2D_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_grp_2d_p_clk, GRP_2D_P_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_hdmi_clk, HDMI_CLK, CLKFLAG_SKIP_AUTO_OFF);
-static DEFINE_CLK_PCOM(p_jpeg_clk, JPEG_CLK, 0);
+static DEFINE_CLK_PCOM(p_jpeg_clk, JPEG_CLK, CLKFLAG_MIN);
 static DEFINE_CLK_PCOM(p_jpeg_p_clk, JPEG_P_CLK, 0);
 static DEFINE_CLK_PCOM(p_lpa_codec_clk, LPA_CODEC_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_lpa_core_clk, LPA_CORE_CLK, CLKFLAG_SKIP_AUTO_OFF);
@@ -2414,7 +2386,7 @@ static DEFINE_CLK_PCOM(p_camif_pad_p_clk, CAMIF_PAD_P_CLK, 0);
 static DEFINE_CLK_PCOM(p_csi0_clk, CSI0_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_csi0_vfe_clk, CSI0_VFE_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_csi0_p_clk, CSI0_P_CLK, CLKFLAG_SKIP_AUTO_OFF);
-static DEFINE_CLK_PCOM(p_mdp_clk, MDP_CLK, 0);
+static DEFINE_CLK_PCOM(p_mdp_clk, MDP_CLK, CLKFLAG_MIN);
 static DEFINE_CLK_PCOM(p_mfc_clk, MFC_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_mfc_div2_clk, MFC_DIV2_CLK, CLKFLAG_SKIP_AUTO_OFF);
 static DEFINE_CLK_PCOM(p_mfc_p_clk, MFC_P_CLK, CLKFLAG_SKIP_AUTO_OFF);
@@ -2454,7 +2426,6 @@ static struct measure_sel measure_mux[] = {
 	{ CLK_TEST_2(0x07), &lpa_p_clk.c },
 	{ CLK_TEST_2(0x08), &usb_hs2_p_clk.c },
 	{ CLK_TEST_2(0x09), &spi_clk.c },
-	{ CLK_TEST_2(0x0A), &midi_clk.c },
 	{ CLK_TEST_2(0x0B), &i2c_2_clk.c },
 	{ CLK_TEST_2(0x0D), &mi2s_m_clk.c },
 	{ CLK_TEST_2(0x0E), &lpa_core_clk.c },
@@ -2580,7 +2551,7 @@ static int measure_clk_set_parent(struct clk *clk, struct clk *parent)
 }
 
 /* Sample clock for 'tcxo4_ticks' reference clock ticks. */
-static u32 run_measurement(unsigned tcxo4_ticks)
+static unsigned long run_measurement(unsigned tcxo4_ticks)
 {
 	/* TCXO4_CNT_EN and RINGOSC_CNT_EN register values. */
 	u32 reg_val_enable = readl_relaxed(MISC_CLK_CTL_BASE_REG) | 0x3;
@@ -2603,7 +2574,7 @@ static u32 run_measurement(unsigned tcxo4_ticks)
 
 /* Perform a hardware rate measurement for a given clock.
    FOR DEBUG USE ONLY: Measurements take ~15 ms! */
-static unsigned measure_clk_get_rate(struct clk *clk)
+static unsigned long measure_clk_get_rate(struct clk *clk)
 {
 	unsigned long flags;
 	u32 regval, prph_web_reg_old;
@@ -2656,7 +2627,7 @@ static int measure_clk_set_parent(struct clk *clk, struct clk *parent)
 	return -EINVAL;
 }
 
-static unsigned measure_clk_get_rate(struct clk *clk)
+static unsigned long measure_clk_get_rate(struct clk *clk)
 {
 	return 0;
 }
@@ -2783,7 +2754,7 @@ static struct clk_local_ownership {
 	{ CLK_LOOKUP("ecodec_clk",	ecodec_clk.c,	NULL) },
 	{ CLK_LOOKUP("core_clk",	gp_clk.c,	NULL) },
 	{ CLK_LOOKUP("core_clk",	uart3_clk.c,	"msm_serial.2") },
-	{ CLK_LOOKUP("usb_phy_clk",	usb_phy_clk.c,	NULL) },
+	{ CLK_LOOKUP("phy_clk",		usb_phy_clk.c,	"msm_otg") },
 
 	/* Voters */
 	{ CLK_LOOKUP("ebi1_dtv_clk",	ebi_dtv_clk.c,	NULL) },
@@ -2819,8 +2790,6 @@ static struct clk_local_ownership {
 	OWN(APPS1, 12, "mi2s_codec_rx_s_clk", mi2s_codec_rx_s_clk, NULL),
 	OWN(APPS1, 14, "mi2s_codec_tx_m_clk", mi2s_codec_tx_m_clk, NULL),
 	OWN(APPS1, 14, "mi2s_codec_tx_s_clk", mi2s_codec_tx_s_clk, NULL),
-	{ CLK_LOOKUP("midi_clk",        midi_clk.c,     NULL),
-		O(APPS1), BIT(22) },
 	OWN(APPS1, 26, "sdac_clk",	sdac_clk,	NULL),
 	OWN(APPS1, 26, "sdac_m_clk",	sdac_m_clk,	NULL),
 	OWN(APPS1,  8, "vfe_clk",	vfe_clk,	NULL),
@@ -2867,12 +2836,12 @@ static struct clk_local_ownership {
 	OWN(ROW1, 29, "core_clk",	sdc4_clk,	"msm_sdcc.4"),
 	OWN(ROW1, 29, "iface_clk",	sdc4_p_clk,	"msm_sdcc.4"),
 	OWN(ROW1,  0, "core_clk",	uart2_clk,	"msm_serial.1"),
-	OWN(ROW1,  2, "usb_hs2_clk",	usb_hs2_clk,	NULL),
-	OWN(ROW1,  2, "usb_hs2_core_clk", usb_hs2_core_clk, NULL),
-	OWN(ROW1,  2, "usb_hs2_pclk",	usb_hs2_p_clk,	NULL),
-	OWN(ROW1,  4, "usb_hs3_clk",	usb_hs3_clk,	NULL),
-	OWN(ROW1,  4, "usb_hs3_core_clk", usb_hs3_core_clk, NULL),
-	OWN(ROW1,  4, "usb_hs3_pclk",	usb_hs3_p_clk,	NULL),
+	OWN(ROW1,  2, "alt_core_clk",	usb_hs2_clk,	"msm_hsusb_host.0"),
+	OWN(ROW1,  2, "core_clk",	usb_hs2_core_clk, "msm_hsusb_host.0"),
+	OWN(ROW1,  2, "iface_clk",	usb_hs2_p_clk,	"msm_hsusb_host.0"),
+	OWN(ROW1,  4, "alt_core_clk",	usb_hs3_clk,	NULL),
+	OWN(ROW1,  4, "core_clk",	usb_hs3_core_clk, NULL),
+	OWN(ROW1,  4, "iface_clk",	usb_hs3_p_clk,	NULL),
 
 	OWN(ROW2,  3, "core_clk",	qup_i2c_clk,	"qup_i2c.4"),
 	OWN(ROW2,  1, "core_clk",	spi_clk,	"spi_qsd.0"),
@@ -2880,9 +2849,9 @@ static struct clk_local_ownership {
 	OWN(ROW2,  9, "core_clk",	uart1_clk,	"msm_serial.0"),
 	OWN(ROW2,  6, "core_clk",	uart1dm_clk,	"msm_serial_hs.0"),
 	OWN(ROW2,  8, "core_clk",	uart2dm_clk,	"msm_serial_hs.1"),
-	OWN(ROW2, 11, "usb_hs_clk",	usb_hs_clk,	NULL),
-	OWN(ROW2, 11, "usb_hs_core_clk", usb_hs_core_clk, NULL),
-	OWN(ROW2, 11, "usb_hs_pclk",	usb_hs_p_clk,	NULL),
+	OWN(ROW2, 11, "alt_core_clk",	usb_hs_clk,	"msm_otg"),
+	OWN(ROW2, 11, "core_clk",	usb_hs_core_clk, "msm_otg"),
+	OWN(ROW2, 11, "iface_clk",	usb_hs_p_clk,	"msm_otg"),
 
 	OWN(APPS3,  6, "cam_m_clk",	cam_m_clk,	NULL),
 	OWN(APPS3,  6, "camif_pad_pclk", camif_pad_p_clk, NULL),
@@ -3008,7 +2977,6 @@ static void __init msm7x30_clock_init(void)
 	clk_set_rate(&uart1_clk.c, 19200000);
 	clk_set_rate(&uart2_clk.c, 19200000);
 	clk_set_rate(&mi2s_m_clk.c, 12288000);
-	clk_set_rate(&midi_clk.c, 98304000);
 	clk_set_rate(&mdp_vsync_clk.c, 24576000);
 	clk_set_rate(&glbl_root_clk.c, 1);
 	clk_set_rate(&mdc_clk.c, 1);
@@ -3032,7 +3000,6 @@ static struct clk_ops clk_ops_rcg_7x30 = {
 	.disable = rcg_clk_disable,
 	.auto_off = rcg_clk_disable,
 	.set_rate = rcg_clk_set_rate,
-	.set_min_rate = rcg_clk_set_min_rate,
 	.get_rate = rcg_clk_get_rate,
 	.list_rate = rcg_clk_list_rate,
 	.is_enabled = rcg_clk_is_enabled,

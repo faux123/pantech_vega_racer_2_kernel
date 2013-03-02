@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,7 +25,7 @@
 #include <linux/mfd/pm8xxx/rtc.h>
 #include <linux/input/pmic8xxx-pwrkey.h>
 #include <linux/mfd/pm8xxx/misc.h>
-#include <linux/regulator/pm8018-regulator.h>
+#include <linux/regulator/pm8xxx-regulator.h>
 #include <linux/mfd/pm8xxx/pm8xxx-adc.h>
 #include <linux/mfd/pm8xxx/pwm.h>
 #include <linux/leds-pm8xxx.h>
@@ -57,6 +57,8 @@
 #define PM8018_ADC_BATT_TEMP_WARM_IRQ	PM8018_IRQ_BLOCK_BIT(9, 1)
 #define PM8018_ADC_BATT_TEMP_COLD_IRQ	PM8018_IRQ_BLOCK_BIT(9, 0)
 
+#define PM8018_LVS1_OCP_IRQ		PM8921_IRQ_BLOCK_BIT(13, 0)
+
 struct pm8018_platform_data {
 	struct pm8xxx_irq_platform_data		*irq_pdata;
 	struct pm8xxx_gpio_platform_data	*gpio_pdata;
@@ -64,7 +66,7 @@ struct pm8018_platform_data {
 	struct pm8xxx_rtc_platform_data         *rtc_pdata;
 	struct pm8xxx_pwrkey_platform_data	*pwrkey_pdata;
 	struct pm8xxx_misc_platform_data	*misc_pdata;
-	struct pm8018_regulator_platform_data	*regulator_pdatas;
+	struct pm8xxx_regulator_platform_data	*regulator_pdatas;
 	struct pm8xxx_adc_platform_data		*adc_pdata;
 	int					num_regulators;
 	struct pm8xxx_led_platform_data		*leds_pdata;

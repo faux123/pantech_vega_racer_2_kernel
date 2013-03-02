@@ -41,6 +41,12 @@
 #define MPX_DCC_PEEK_MSB_REG3      (0x88)
 #define MPX_DCC_PEEK_LSB_REG3      (0xC4)
 
+#define ON_CHANNEL_TH_MSB          (0x0B)
+#define ON_CHANNEL_TH_LSB          (0xA8)
+
+#define OFF_CHANNEL_TH_MSB         (0x0B)
+#define OFF_CHANNEL_TH_LSB         (0xAC)
+
 #define ENF_200Khz                    (1)
 #define SRCH200KHZ_OFFSET             (7)
 #define SRCH_MASK                  (1 << SRCH200KHZ_OFFSET)
@@ -141,13 +147,32 @@ enum v4l2_cid_private_tavarua_t {
 	V4L2_CID_PRIVATE_TAVARUA_AF_JUMP,
 	V4L2_CID_PRIVATE_TAVARUA_RSSI_DELTA,
 	V4L2_CID_PRIVATE_TAVARUA_HLSI,
+
 	/*
-	* Here We have IOCTl's that are specifici to IRIS
-	* (V4L2_CID_PRIVATE_BASE+0x1D--V4L2_CID_PRIVATE_BASE+0x27)
+	* Here we have IOCTl's that are specific to IRIS
+	* (V4L2_CID_PRIVATE_BASE + 0x1E to V4L2_CID_PRIVATE_BASE + 0x28)
 	*/
-	V4L2_CID_PRIVATE_TAVARUA_SET_NOTCH_FILTER =
-		V4L2_CID_PRIVATE_BASE + 0x28,
-	V4L2_CID_PRIVATE_TAVARUA_SET_AUDIO_PATH
+	V4L2_CID_PRIVATE_SOFT_MUTE,/* 0x800001E*/
+	V4L2_CID_PRIVATE_RIVA_ACCS_ADDR,
+	V4L2_CID_PRIVATE_RIVA_ACCS_LEN,
+	V4L2_CID_PRIVATE_RIVA_PEEK,
+	V4L2_CID_PRIVATE_RIVA_POKE,
+	V4L2_CID_PRIVATE_SSBI_ACCS_ADDR,
+	V4L2_CID_PRIVATE_SSBI_PEEK,
+	V4L2_CID_PRIVATE_SSBI_POKE,
+	V4L2_CID_PRIVATE_TX_TONE,
+	V4L2_CID_PRIVATE_RDS_GRP_COUNTERS,
+	V4L2_CID_PRIVATE_SET_NOTCH_FILTER,/* 0x8000028 */
+
+	V4L2_CID_PRIVATE_TAVARUA_SET_AUDIO_PATH,/* 0x8000029 */
+	V4L2_CID_PRIVATE_TAVARUA_DO_CALIBRATION,/* 0x800002A : IRIS */
+	V4L2_CID_PRIVATE_TAVARUA_SRCH_ALGORITHM,/* 0x800002B */
+	V4L2_CID_PRIVATE_IRIS_GET_SINR, /* 0x800002C : IRIS */
+	V4L2_CID_PRIVATE_INTF_LOW_THRESHOLD, /* 0x800002D */
+	V4L2_CID_PRIVATE_INTF_HIGH_THRESHOLD, /* 0x800002E */
+	V4L2_CID_PRIVATE_SINR_THRESHOLD,  /* 0x800002F : IRIS */
+	V4L2_CID_PRIVATE_SINR_SAMPLES,  /* 0x8000030 : IRIS */
+
 };
 
 enum tavarua_buf_t {
@@ -323,6 +348,9 @@ enum audio_path {
 #define SET_REG_FIELD(reg, val, offset, mask) \
 	(reg = (reg & ~mask) | (((val) << offset) & mask))
 #define GET_REG_FIELD(reg, offset, mask) ((reg & mask) >> offset)
+#define RSH_DATA(val, offset)    ((val) >> (offset))
+#define LSH_DATA(val, offset)    ((val) << (offset))
+#define GET_ABS_VAL(val)        ((val) & (0xFF))
 
 enum radio_state_t {
 	FM_OFF,

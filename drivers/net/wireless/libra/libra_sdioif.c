@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,6 +28,38 @@ static unsigned short  libra_sdio_card_id;
 
 static suspend_handler_t *libra_suspend_hldr;
 static resume_handler_t *libra_resume_hldr;
+static notify_card_removal_t *libra_notify_card_removal_hdlr;
+
+int libra_enable_sdio_irq_in_chip(struct sdio_func *func, u8 enable)
+{
+	unsigned char reg = 0;
+	int err = 0;
+
+	sdio_claim_host(func);
+
+	/* Read the value into reg */
+	libra_sdiocmd52(func, SDIO_CCCR_IENx, &reg, 0, &err);
+	if (err)
+		printk(KERN_ERR "%s: Could not read  SDIO_CCCR_IENx register "
+				"err=%d\n", __func__, err);
+
+	if (libra_mmc_host) {
+		if (enable) {
+			reg |= 1 << func->num;
+			reg |= 1;
+		} else {
+			reg &= ~(1 << func->num);
+		}
+		libra_sdiocmd52(func, SDIO_CCCR_IENx, &reg, 1, &err);
+		if (err)
+			printk(KERN_ERR "%s: Could not enable/disable irq "
+					 "err=%d\n", __func__, err);
+	 }
+	sdio_release_host(func);
+
+	return err;
+}
+EXPORT_SYMBOL(libra_enable_sdio_irq_in_chip);
 
 /**
  * libra_sdio_configure() - Function to configure the SDIO device param
@@ -88,6 +120,8 @@ int libra_sdio_configure(sdio_irq_handler_t libra_sdio_rxhandler,
 		sdio_release_host(func);
 		goto cfg_error;
 	}
+
+	libra_enable_sdio_irq_in_chip(func, 0);
 
 	sdio_release_host(func);
 
@@ -364,6 +398,8 @@ static int libra_sdio_probe(struct sdio_func *func,
 
 static void libra_sdio_remove(struct sdio_func *func)
 {
+	if (libra_notify_card_removal_hdlr)
+		libra_notify_card_removal_hdlr();
 	libra_sdio_func = NULL;
 
 	printk(KERN_INFO "%s : Module removed.\n", __func__);
@@ -416,6 +452,14 @@ static int libra_sdio_resume(struct device *dev)
 #define libra_sdio_resume 0
 #endif
 
+int libra_sdio_notify_card_removal(
+		notify_card_removal_t *libra_sdio_notify_card_removal_hdlr)
+{
+	libra_notify_card_removal_hdlr = libra_sdio_notify_card_removal_hdlr;
+	return 0;
+}
+EXPORT_SYMBOL(libra_sdio_notify_card_removal);
+
 static struct sdio_device_id libra_sdioid[] = {
     {.class = 0, .vendor = LIBRA_MAN_ID,  .device = LIBRA_REV_1_0_CARD_ID},
     {.class = 0, .vendor = VOLANS_MAN_ID, .device = VOLANS_REV_2_0_CARD_ID},
@@ -442,6 +486,7 @@ static int __init libra_sdioif_init(void)
 	libra_mmc_host_index = -1;
 	libra_suspend_hldr = NULL;
 	libra_resume_hldr = NULL;
+	libra_notify_card_removal_hdlr = NULL;
 
 	sdio_register_driver(&libra_sdiofn_driver);
 

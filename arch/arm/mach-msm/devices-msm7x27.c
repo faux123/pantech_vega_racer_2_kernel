@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2008 Google, Inc.
- * Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -18,6 +18,7 @@
 #include <linux/msm_kgsl.h>
 #include <linux/regulator/machine.h>
 #include <linux/dma-mapping.h>
+#include <linux/init.h>
 #include <asm/clkdev.h>
 #include <mach/irqs.h>
 #include <mach/msm_iomap.h>
@@ -807,32 +808,22 @@ static struct resource kgsl_3d0_resources[] = {
 };
 
 static struct kgsl_device_platform_data kgsl_3d0_pdata = {
-	.pwr_data = {
-		/* bus_freq has been set to 160000 for power savings.
-		 * OEMs may modify the value at their discretion for performance
-		 * The appropriate maximum replacement for 160000 is:
-		 * msm7x2x_clock_data.max_axi_khz
-		 */
-		.pwrlevel = {
-			{
-				.gpu_freq = 0,
-				.bus_freq = 160000000,
-			},
-		},
-		.init_level = 0,
-		.num_levels = 1,
-		.set_grp_async = NULL,
-		.idle_timeout = HZ/5,
-	},
-	.clk = {
-		.name = {
-			.clk = "core_clk",
-			.pclk = "iface_clk",
+	/* bus_freq has been set to 160000 for power savings.
+	* OEMs may modify the value at their discretion for performance
+	* The appropriate maximum replacement for 160000 is:
+	* msm7x2x_clock_data.max_axi_khz
+	*/
+	.pwrlevel = {
+		{
+			.gpu_freq = 0,
+			.bus_freq = 160000000,
 		},
 	},
-	.imem_clk_name = {
-		.clk = "mem_clk",
-	},
+	.init_level = 0,
+	.num_levels = 1,
+	.set_grp_async = NULL,
+	.idle_timeout = HZ/5,
+	.clk_map = KGSL_CLK_CORE | KGSL_CLK_IFACE | KGSL_CLK_MEM,
 };
 
 struct platform_device msm_kgsl_3d0 = {
@@ -849,3 +840,29 @@ struct platform_device *msm_footswitch_devices[] = {
 	FS_PCOM(FS_GFX3D,  "fs_gfx3d"),
 };
 unsigned msm_num_footswitch_devices = ARRAY_SIZE(msm_footswitch_devices);
+
+static struct resource gpio_resources[] = {
+	{
+		.start  = INT_GPIO_GROUP1,
+		.flags  = IORESOURCE_IRQ,
+	},
+	{
+		.start  = INT_GPIO_GROUP2,
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device msm_device_gpio = {
+	.name	   = "msmgpio",
+	.id	     = -1,
+	.resource       = gpio_resources,
+	.num_resources  = ARRAY_SIZE(gpio_resources),
+};
+
+static int __init msm7627_init_gpio(void)
+{
+	platform_device_register(&msm_device_gpio);
+	return 0;
+}
+
+postcore_initcall(msm7627_init_gpio);

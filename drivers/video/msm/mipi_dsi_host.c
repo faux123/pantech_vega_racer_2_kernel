@@ -1,5 +1,5 @@
 
-/* Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,17 +39,53 @@
 #include "mdp.h"
 #include "mdp4.h"
 
-int mipi_dsi_clk_on;
+#if defined (CONFIG_MACH_MSM8960_EF45K) || defined (CONFIG_MACH_MSM8960_EF47S)
+#include "mipi_rohm.h"
+#endif
+
 static struct completion dsi_dma_comp;
 static struct completion dsi_mdp_comp;
 static struct dsi_buf dsi_tx_buf;
-static int dsi_irq_enabled;
+ int dsi_irq_enabled;
 static spinlock_t dsi_irq_lock;
 static spinlock_t dsi_mdp_lock;
 static int dsi_mdp_busy;
 
 static struct list_head pre_kickoff_list;
 static struct list_head post_kickoff_list;
+
+enum {
+	STAT_DSI_START,
+	STAT_DSI_ERROR,
+	STAT_DSI_CMD,
+	STAT_DSI_MDP
+};
+
+#ifdef CONFIG_FB_MSM_MDP40
+void mipi_dsi_mdp_stat_inc(int which)
+{
+	switch (which) {
+	case STAT_DSI_START:
+		mdp4_stat.dsi_mdp_start++;
+		break;
+	case STAT_DSI_ERROR:
+		mdp4_stat.intr_dsi_err++;
+		break;
+	case STAT_DSI_CMD:
+		mdp4_stat.intr_dsi_cmd++;
+		break;
+	case STAT_DSI_MDP:
+		mdp4_stat.intr_dsi_mdp++;
+		break;
+	default:
+		break;
+	}
+}
+#else
+void mipi_dsi_mdp_stat_inc(int which)
+{
+}
+#endif
 
 void mipi_dsi_init(void)
 {
@@ -114,11 +150,6 @@ void mipi_dsi_disable_irq(void)
 
 void mipi_dsi_turn_on_clks(void)
 {
-	if (mipi_dsi_clk_on) {
-		pr_err("%s: mipi_dsi_clks already ON\n", __func__);
-		return;
-	}
-	mipi_dsi_clk_on = 1;
 	local_bh_disable();
 	mipi_dsi_ahb_ctrl(1);
 	mipi_dsi_clk_enable();
@@ -127,11 +158,6 @@ void mipi_dsi_turn_on_clks(void)
 
 void mipi_dsi_turn_off_clks(void)
 {
-	if (mipi_dsi_clk_on == 0) {
-		pr_err("%s: mipi_dsi_clks already OFF\n", __func__);
-		return;
-	}
-	mipi_dsi_clk_on = 0;
 	local_bh_disable();
 	mipi_dsi_clk_disable();
 	mipi_dsi_ahb_ctrl(0);
@@ -759,6 +785,11 @@ void mipi_dsi_host_init(struct mipi_panel_info *pinfo)
 	uint32 dsi_ctrl, intr_ctrl;
 	uint32 data;
 
+	if (mdp_rev > MDP_REV_41 || mdp_rev == MDP_REV_303)
+		pinfo->rgb_swap = DSI_RGB_SWAP_RGB;
+	else
+		pinfo->rgb_swap = DSI_RGB_SWAP_BGR;
+
 	if (pinfo->mode == DSI_VIDEO_MODE) {
 		data = 0;
 		if (pinfo->pulse_mode_hsa_he)
@@ -777,11 +808,6 @@ void mipi_dsi_host_init(struct mipi_panel_info *pinfo)
 		data |= ((pinfo->dst_format & 0x03) << 4); /* 2 bits */
 		data |= (pinfo->vc & 0x03);
 		MIPI_OUTP(MIPI_DSI_BASE + 0x000c, data);
-
-		if (mdp_rev > MDP_REV_41 || mdp_rev == MDP_REV_303)
-			pinfo->rgb_swap = DSI_RGB_SWAP_RGB;
-		else
-			pinfo->rgb_swap = DSI_RGB_SWAP_BGR;
 
 		data = 0;
 		data |= ((pinfo->rgb_swap & 0x07) << 12);
@@ -942,6 +968,9 @@ void mipi_dsi_controller_cfg(int enable)
 void mipi_dsi_op_mode_config(int mode)
 {
 
+#if defined(CONFIG_MACH_MSM8960_CHEETAH) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI) || defined(CONFIG_MACH_MSM8960_STARQ) /* for hs clk , shinjg */
+	uint32 data;
+#endif
 	uint32 dsi_ctrl, intr_ctrl;
 
 	dsi_ctrl = MIPI_INP(MIPI_DSI_BASE + 0x0000);
@@ -957,6 +986,21 @@ void mipi_dsi_op_mode_config(int mode)
 
 	pr_debug("%s: dsi_ctrl=%x intr=%x\n", __func__, dsi_ctrl, intr_ctrl);
 
+#if defined(CONFIG_MACH_MSM8960_CHEETAH) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI) || defined(CONFIG_MACH_MSM8960_STARQ)
+	//set BLLP_POWER_STOP
+	if(mode == DSI_VIDEO_MODE)
+	{
+		data = MIPI_INP(MIPI_DSI_BASE + 0x000c);
+		data |= BIT(12); // BLLP_POWER_STOP 
+		MIPI_OUTP(MIPI_DSI_BASE + 0x000c, data); 
+	}else
+	{
+		data = MIPI_INP(MIPI_DSI_BASE + 0x000c);
+		data &= ~BIT(12); // BLLP_POWER_STOP 
+		MIPI_OUTP(MIPI_DSI_BASE + 0x000c, data); 
+	}
+#endif
+
 	MIPI_OUTP(MIPI_DSI_BASE + 0x010c, intr_ctrl); /* DSI_INTL_CTRL */
 	MIPI_OUTP(MIPI_DSI_BASE + 0x0000, dsi_ctrl);
 	wmb();
@@ -966,7 +1010,7 @@ void mipi_dsi_mdp_busy_wait(struct msm_fb_data_type *mfd)
 {
 	unsigned long flag;
 	int need_wait = 0;
-
+	int ret;
 	pr_debug("%s: start pid=%d\n",
 				__func__, current->pid);
 	spin_lock_irqsave(&dsi_mdp_lock, flag);
@@ -980,11 +1024,29 @@ void mipi_dsi_mdp_busy_wait(struct msm_fb_data_type *mfd)
 		/* wait until DMA finishes the current job */
 		pr_debug("%s: pending pid=%d\n",
 				__func__, current->pid);
-		wait_for_completion(&dsi_mdp_comp);
+		//wait_for_completion(&dsi_mdp_comp);
+		ret = wait_for_completion_timeout(&dsi_mdp_comp,1*HZ/50);
+		if(ret == 0) {
+			uint32 isr;
+
+			isr = MIPI_INP(MIPI_DSI_BASE + 0x010c);
+			pr_err("wait_for_completion_timeout err = %d %x %d\n",ret, isr, dsi_irq_enabled);
+
+/*			if (isr & DSI_INTR_CMD_MDP_DONE) {
+				MIPI_OUTP(MIPI_DSI_BASE + 0x010c, DSI_INTR_CMD_MDP_DONE);
+				mipi_dsi_mdp_stat_inc(STAT_DSI_MDP);
+				spin_lock(&dsi_mdp_lock);
+				dsi_mdp_busy = FALSE;
+				spin_unlock(&dsi_mdp_lock);
+				mipi_dsi_disable_irq();
+				mipi_dsi_post_kickoff_action();
+			} */
+	}
 	}
 	pr_debug("%s: done pid=%d\n",
 				__func__, current->pid);
 }
+
 
 void mipi_dsi_cmd_mdp_start(void)
 {
@@ -993,6 +1055,8 @@ void mipi_dsi_cmd_mdp_start(void)
 
 	if (!in_interrupt())
 		mipi_dsi_pre_kickoff_action();
+
+	mipi_dsi_mdp_stat_inc(STAT_DSI_START);
 
 	spin_lock_irqsave(&dsi_mdp_lock, flag);
 	mipi_dsi_enable_irq();
@@ -1092,12 +1156,14 @@ int mipi_dsi_cmds_tx(struct msm_fb_data_type *mfd,
 	if (video_mode) {
 		ctrl = dsi_ctrl | 0x04; /* CMD_MODE_EN */
 		MIPI_OUTP(MIPI_DSI_BASE + 0x0000, ctrl);
+		//printk("[shinbrad] : %s:Video Mode\n",__func__);
 	} else { /* cmd mode */
 		/*
 		 * during boot up, cmd mode is configured
 		 * even it is video mode panel.
 		 */
 		/* make sure mdp dma is not txing pixel data */
+		//printk("[shinbrad] : %s:CMD Panel Mode\n",__func__);
 		if (mfd->panel_info.type == MIPI_CMD_PANEL) {
 #ifndef CONFIG_FB_MSM_MDP303
 			mdp4_dsi_cmd_dma_busy_wait(mfd);
@@ -1159,20 +1225,26 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 			struct dsi_buf *tp, struct dsi_buf *rp,
 			struct dsi_cmd_desc *cmds, int rlen)
 {
-	int i , cnt, len, diff, pkt_size;
+	int cnt, len, diff, pkt_size;
 	unsigned long flag;
 	char cmd;
+
+	if (mfd->panel_info.mipi.no_max_pkt_size) {
+		/* Only support rlen = 4*n */
+		rlen += 3;
+		rlen &= ~0x03;
+	}
 
 	len = rlen;
 	diff = 0;
 
+#if defined(CONFIG_MACH_MSM8960_CHEETAH)
+	MIPI_OUTP(MIPI_DSI_BASE + 0x38, 0x10000000);    // High Speed 
+#endif
+
 	if (len <= 2)
 		cnt = 4;	/* short read */
-	else if (mfd->panel_info.mipi.fixed_packet_size) {
-		len = mfd->panel_info.mipi.fixed_packet_size;
-		pkt_size = len; /* Avoid command to the device */
-		cnt = (len + 6 + 3) & ~0x03; /* Add padding for align */
-	} else {
+	else {
 		if (len > MIPI_DSI_LEN)
 			len = MIPI_DSI_LEN;	/* 8 bytes at most */
 
@@ -1203,7 +1275,7 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 	dsi_mdp_busy = TRUE;
 	spin_unlock_irqrestore(&dsi_mdp_lock, flag);
 
-	if (!mfd->panel_info.mipi.fixed_packet_size) {
+	if (!mfd->panel_info.mipi.no_max_pkt_size) {
 		/* packet size need to be set at every read */
 		pkt_size = len;
 		max_pktsize[0] = pkt_size;
@@ -1223,10 +1295,15 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 	 * at RDBK_DATA register already
 	 */
 	mipi_dsi_buf_init(rp);
-	mipi_dsi_cmd_dma_rx(rp, cnt);
+	if (mfd->panel_info.mipi.no_max_pkt_size) {
+		/*
+		 * expect rlen = n * 4
+		 * short alignement for start addr
+		 */
+		rp->data += 2;
+	}
 
-	for (i = 0; i < cnt ; i++)
-		pr_debug("%s.rp->data[%d]=0x%x.\n", __func__, i, rp->data[i]);
+	mipi_dsi_cmd_dma_rx(rp, cnt);
 
 	spin_lock_irqsave(&dsi_mdp_lock, flag);
 	dsi_mdp_busy = FALSE;
@@ -1234,12 +1311,16 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 	complete(&dsi_mdp_comp);
 	spin_unlock_irqrestore(&dsi_mdp_lock, flag);
 
-	/* Remove leading padding zeros if exist */
-	for (i = 0; i < cnt ; i++)
-		if (rp->data[0] == 0)
-			rp->data++;
-		else
-			break;
+	if (mfd->panel_info.mipi.no_max_pkt_size) {
+		/*
+		 * remove extra 2 bytes from previous
+		 * rx transaction at shift register
+		 * which was inserted during copy
+		 * shift registers to rx buffer
+		 * rx payload start from long alignment addr
+		 */
+		rp->data += 2;
+	}
 
 	cmd = rp->data[0];
 	switch (cmd) {
@@ -1263,6 +1344,9 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 	default:
 		break;
 	}
+#if defined(CONFIG_MACH_MSM8960_CHEETAH)
+//	 MIPI_OUTP(MIPI_DSI_BASE + 0x38, 0x14000000);    // Low Power Mode
+#endif
 
 	return rp->len;
 }
@@ -1300,7 +1384,13 @@ int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 	MIPI_OUTP(MIPI_DSI_BASE + 0x08c, 0x01);	/* trigger */
 	wmb();
 
+  /* LCD shinjg */
+#if defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI)  || defined (CONFIG_MACH_MSM8960_EF45K) ||\
+	defined(CONFIG_MACH_MSM8960_EF47S) || defined(CONFIG_MACH_MSM8960_EF46L) || defined (CONFIG_MACH_MSM8960_OSCAR)
+	wait_for_completion_timeout(&dsi_dma_comp, 50UL); // 10 -> 5 flick cursor
+#else
 	wait_for_completion(&dsi_dma_comp);
+#endif
 
 	dma_unmap_single(&dsi_dev, tp->dmap, len, DMA_TO_DEVICE);
 	tp->dmap = 0;
@@ -1420,6 +1510,9 @@ irqreturn_t mipi_dsi_isr(int irq, void *ptr)
 	uint32 isr;
 
 	isr = MIPI_INP(MIPI_DSI_BASE + 0x010c);/* DSI_INTR_CTRL */
+	#if defined (CONFIG_MACH_MSM8960_OSCAR)
+	isr |= (DSI_INTR_CMD_DMA_DONE_MASK | DSI_INTR_ERROR_MASK | DSI_INTR_CMD_MDP_DONE_MASK); 
+	#endif
 	MIPI_OUTP(MIPI_DSI_BASE + 0x010c, isr);
 
 #ifdef CONFIG_FB_MSM_MDP40
@@ -1427,6 +1520,7 @@ irqreturn_t mipi_dsi_isr(int irq, void *ptr)
 #endif
 
 	if (isr & DSI_INTR_ERROR) {
+		mipi_dsi_mdp_stat_inc(STAT_DSI_ERROR);
 		mipi_dsi_error();
 	}
 
@@ -1437,15 +1531,19 @@ irqreturn_t mipi_dsi_isr(int irq, void *ptr)
 	}
 
 	if (isr & DSI_INTR_CMD_DMA_DONE) {
+		mipi_dsi_mdp_stat_inc(STAT_DSI_CMD);
 		complete(&dsi_dma_comp);
 	}
 
 	if (isr & DSI_INTR_CMD_MDP_DONE) {
+		mipi_dsi_mdp_stat_inc(STAT_DSI_MDP);
 		spin_lock(&dsi_mdp_lock);
 		dsi_mdp_busy = FALSE;
+		mipi_dsi_disable_irq_nosync();
+		//jiseunghwa@ reason : OSCAR problem, deadlock happens, because of spin_lock
+		//so i moved spin_unlock position
 		spin_unlock(&dsi_mdp_lock);
 		complete(&dsi_mdp_comp);
-		mipi_dsi_disable_irq_nosync();
 		mipi_dsi_post_kickoff_action();
 	}
 

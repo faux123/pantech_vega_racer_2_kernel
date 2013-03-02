@@ -34,6 +34,13 @@
 
 #include "smd_private.h"
 
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#include "sky_sys_reset.h"
+
+extern int sky_reset_reason;
+#endif
+
 struct subsys_soc_restart_order {
 	const char * const *subsystem_list;
 	int count;
@@ -138,6 +145,11 @@ static int restart_level_set(const char *val, struct kernel_param *kp)
 {
 	int ret;
 	int old_val = restart_level;
+
+	if (cpu_is_msm9615()) {
+		pr_err("Only Phase 1 subsystem restart is supported\n");
+		return -EINVAL;
+	}
 
 	ret = param_set_int(val, kp);
 	if (ret)
@@ -252,6 +264,8 @@ static void do_epoch_check(struct subsys_data *subsys)
 		goto out;
 
 	r_log = kmalloc(sizeof(struct restart_log), GFP_KERNEL);
+	if (!r_log)
+		goto out;
 	r_log->subsys = subsys;
 	do_gettimeofday(&r_log->time);
 	curr_time = &r_log->time;
@@ -438,8 +452,8 @@ int subsystem_restart(const char *subsys_name)
 		return -EINVAL;
 	}
 
-	pr_info("Restart sequence requested for %s\n",
-		subsys_name);
+	pr_info("Restart sequence requested for %s, restart_level = %d.\n",
+		subsys_name, restart_level);
 
 	/* List of subsystems is protected by a lock. New subsystems can
 	 * still come in.
@@ -450,6 +464,26 @@ int subsystem_restart(const char *subsys_name)
 		pr_warn("Unregistered subsystem %s!\n", subsys_name);
 		return -EINVAL;
 	}
+
+    //chjeon20111021@LS1 add
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+    if(!strncmp(subsys_name, "lpass", 5)) 
+    {
+        sky_reset_reason=SYS_RESET_REASON_LPASS;
+    }
+    else if(!strncmp(subsys_name, "modem", 5)) 
+    {
+        sky_reset_reason=SYS_RESET_REASON_EXCEPTION;
+    }
+    else if(!strncmp(subsys_name, "dsps", 4)) 
+    {
+        sky_reset_reason=SYS_RESET_REASON_DSPS;
+    }
+    else if( (!strncmp(subsys_name, "riva", 4)) || (!strncmp(subsys_name, "wcnss", 5)) ) 
+    {
+        sky_reset_reason=SYS_RESET_REASON_RIVA;
+    }
+#endif
 
 	if (restart_level != RESET_SOC) {
 		data = kzalloc(sizeof(struct restart_thread_data), GFP_KERNEL);
@@ -490,7 +524,8 @@ int subsystem_restart(const char *subsys_name)
 		break;
 
 	case RESET_SOC:
-		panic("subsys-restart: Resetting the SoC");
+		panic("subsys-restart: Resetting the SoC - %s crashed.",
+			subsys->name);
 		break;
 
 	default:
@@ -569,7 +604,7 @@ static int __init ssr_init_soc_restart_orders(void)
 		n_restart_orders = ARRAY_SIZE(orders_8x60_all);
 	}
 
-	if (cpu_is_msm8960() || cpu_is_msm8930()) {
+	if (cpu_is_msm8960() || cpu_is_msm8930() || cpu_is_msm9615()) {
 		restart_orders = restart_orders_8960;
 		n_restart_orders = ARRAY_SIZE(restart_orders_8960);
 	}

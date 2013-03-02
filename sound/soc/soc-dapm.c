@@ -1305,19 +1305,33 @@ static void dapm_seq_run(struct snd_soc_dapm_context *dapm,
 	struct snd_soc_dapm_context *cur_dapm = NULL;
 	int ret, i;
 	int *sort;
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+	int nWidgets;
+#endif
 
 	if (power_up)
 		sort = dapm_up_seq;
 	else
 		sort = dapm_down_seq;
 
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+	nWidgets = ARRAY_SIZE(dapm_up_seq);
+#endif
+
 	list_for_each_entry_safe(w, n, list, power_list) {
 		ret = 0;
+
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+		if (!w->name)
+			continue;
+		if (!((w->id >= 0) && (w->id < nWidgets)))
+			continue;
+#endif
 
 		/* Do we need to apply any queued changes? */
 		if (sort[w->id] != cur_sort || w->reg != cur_reg ||
 		    w->dapm != cur_dapm || w->subseq != cur_subseq) {
-			if (!list_empty(&pending))
+			if (cur_dapm && !list_empty(&pending))
 				dapm_seq_run_coalesced(cur_dapm, &pending);
 
 			if (cur_dapm && cur_dapm->seq_notifier) {
@@ -1377,7 +1391,7 @@ static void dapm_seq_run(struct snd_soc_dapm_context *dapm,
 				"Failed to apply widget power: %d\n", ret);
 	}
 
-	if (!list_empty(&pending))
+	if (cur_dapm && !list_empty(&pending))
 		dapm_seq_run_coalesced(cur_dapm, &pending);
 
 	if (cur_dapm && cur_dapm->seq_notifier) {
@@ -1499,6 +1513,10 @@ static int dapm_power_widgets(struct snd_soc_dapm_context *dapm, int event)
 
 	trace_snd_soc_dapm_start(card);
 
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+	mutex_lock(&card->dapm_power_mutex);
+#endif
+
 	list_for_each_entry(d, &card->dapm_list, list)
 		if (d->n_widgets || d->codec == NULL)
 			d->dev_power = 0;
@@ -1607,6 +1625,10 @@ static int dapm_power_widgets(struct snd_soc_dapm_context *dapm, int event)
 	pop_dbg(dapm->dev, card->pop_time,
 		"DAPM sequencing finished, waiting %dms\n", card->pop_time);
 	pop_wait(card->pop_time);
+
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+	mutex_unlock(&card->dapm_power_mutex);
+#endif
 
 	trace_snd_soc_dapm_done(card);
 

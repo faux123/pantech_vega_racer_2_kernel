@@ -64,8 +64,11 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/otg.h>
+#include <linux/poll.h>
+#include <linux/wait.h>
 
 #include "ci13xxx_udc.h"
+#include "f_pantech_android.h"
 
 
 /******************************************************************************
@@ -155,6 +158,7 @@ static struct {
 #define CAP_ENDPTLISTADDR   (0x018UL)
 #define CAP_PORTSC          (0x044UL)
 #define CAP_DEVLC           (0x084UL)
+#define CAP_ENDPTPIPEID     (0x0BCUL)
 #define CAP_USBMODE         (hw_bank.lpm ? 0x0C8UL : 0x068UL)
 #define CAP_ENDPTSETUPSTAT  (hw_bank.lpm ? 0x0D8UL : 0x06CUL)
 #define CAP_ENDPTPRIME      (hw_bank.lpm ? 0x0DCUL : 0x070UL)
@@ -877,7 +881,7 @@ static void dbg_print(u8 addr, const char *name, int status, const char *extra)
 	stamp = stamp * 1000000 + tval.tv_usec;
 
 	scnprintf(dbg_data.buf[dbg_data.idx], DBG_DATA_MSG,
-		  "%04X\t» %02X %-7.7s %4i «\t%s\n",
+		  "%04X\t %02X %-7.7s %4i \t%s\n",
 		  stamp, addr, name, status, extra);
 
 	dbg_inc(&dbg_data.idx);
@@ -885,7 +889,7 @@ static void dbg_print(u8 addr, const char *name, int status, const char *extra)
 	write_unlock_irqrestore(&dbg_data.lck, flags);
 
 	if (dbg_data.tty != 0)
-		pr_notice("%04X\t» %02X %-7.7s %4i «\t%s\n",
+		pr_notice("%04X\t %02X %-7.7s %4i \t%s\n",
 			  stamp, addr, name, status, extra);
 }
 
@@ -1045,15 +1049,15 @@ static ssize_t show_inters(struct device *dev, struct device_attribute *attr,
 
 	n += scnprintf(buf + n, PAGE_SIZE - n, "*test = %d\n",
 		       isr_statistics.test);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» ui  = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, " ui  = %d\n",
 		       isr_statistics.ui);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» uei = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, " uei = %d\n",
 		       isr_statistics.uei);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» pci = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, " pci = %d\n",
 		       isr_statistics.pci);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» uri = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, " uri = %d\n",
 		       isr_statistics.uri);
-	n += scnprintf(buf + n, PAGE_SIZE - n, "» sli = %d\n",
+	n += scnprintf(buf + n, PAGE_SIZE - n, " sli = %d\n",
 		       isr_statistics.sli);
 	n += scnprintf(buf + n, PAGE_SIZE - n, "*none = %d\n",
 		       isr_statistics.none);
@@ -1638,6 +1642,23 @@ static int _hardware_enqueue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 		if (!mReq->req.no_interrupt)
 			mReq->ptr->token  |= TD_IOC;
 	}
+
+	/* MSM Specific: updating the request as required for
+	 * SPS mode. Enable MSM proprietary DMA engine acording
+	 * to the UDC private data in the request.
+	 */
+	if (CI13XX_REQ_VENDOR_ID(mReq->req.udc_priv) == MSM_VENDOR_ID) {
+		if (mReq->req.udc_priv & MSM_SPS_MODE) {
+			mReq->ptr->token = TD_STATUS_ACTIVE;
+			if (mReq->req.udc_priv & MSM_TBE)
+				mReq->ptr->next = TD_TERMINATE;
+			else
+				mReq->ptr->next = MSM_ETD_TYPE | mReq->dma;
+			if (!mReq->req.no_interrupt)
+				mReq->ptr->token |= MSM_ETD_IOC;
+		}
+	}
+
 	mReq->ptr->page[0]  = mReq->req.dma;
 	for (i = 1; i < 5; i++)
 		mReq->ptr->page[i] =
@@ -1680,6 +1701,39 @@ static int _hardware_enqueue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 	}
 
 	mEp->qh.ptr->td.next   = mReq->dma;    /* TERMINATE = 0 */
+
+	if (CI13XX_REQ_VENDOR_ID(mReq->req.udc_priv) == MSM_VENDOR_ID) {
+		if (mReq->req.udc_priv & MSM_SPS_MODE) {
+			mEp->qh.ptr->td.next   |= MSM_ETD_TYPE;
+			i = hw_cread(CAP_ENDPTPIPEID +
+						 mEp->num * sizeof(u32), ~0);
+			/* Read current value of this EPs pipe id */
+			i = (mEp->dir == TX) ?
+				((i >> MSM_TX_PIPE_ID_OFS) & MSM_PIPE_ID_MASK) :
+					(i & MSM_PIPE_ID_MASK);
+			/* If requested pipe id is different from current,
+			   then write it */
+			if (i != (mReq->req.udc_priv & MSM_PIPE_ID_MASK)) {
+				if (mEp->dir == TX)
+					hw_cwrite(
+						CAP_ENDPTPIPEID +
+							mEp->num * sizeof(u32),
+						MSM_PIPE_ID_MASK <<
+							MSM_TX_PIPE_ID_OFS,
+						(mReq->req.udc_priv &
+						 MSM_PIPE_ID_MASK)
+							<< MSM_TX_PIPE_ID_OFS);
+				else
+					hw_cwrite(
+						CAP_ENDPTPIPEID +
+							mEp->num * sizeof(u32),
+						MSM_PIPE_ID_MASK,
+						mReq->req.udc_priv &
+							MSM_PIPE_ID_MASK);
+			}
+		}
+	}
+
 	mEp->qh.ptr->td.token &= ~TD_STATUS;   /* clear status */
 	mEp->qh.ptr->cap |=  QH_ZLT;
 
@@ -1712,6 +1766,10 @@ static int _hardware_dequeue(struct ci13xxx_ep *mEp, struct ci13xxx_req *mReq)
 	if ((TD_STATUS_ACTIVE & mReq->ptr->token) != 0)
 		return -EBUSY;
 
+	if (CI13XX_REQ_VENDOR_ID(mReq->req.udc_priv) == MSM_VENDOR_ID)
+		if ((mReq->req.udc_priv & MSM_SPS_MODE) &&
+			(mReq->req.udc_priv & MSM_TBE))
+			return -EBUSY;
 	if (mReq->zptr) {
 		if ((TD_STATUS_ACTIVE & mReq->zptr->token) != 0)
 			return -EBUSY;
@@ -1756,6 +1814,7 @@ __releases(mEp->lock)
 __acquires(mEp->lock)
 {
 	struct ci13xxx_ep *mEpTemp = mEp;
+	unsigned val;
 
 	trace("%p", mEp);
 
@@ -1771,7 +1830,30 @@ __acquires(mEp->lock)
 			list_entry(mEp->qh.queue.next,
 				   struct ci13xxx_req, queue);
 		list_del_init(&mReq->queue);
+
+		/* MSM Specific: Clear end point proprietary register */
+		if (CI13XX_REQ_VENDOR_ID(mReq->req.udc_priv) == MSM_VENDOR_ID) {
+			if (mReq->req.udc_priv & MSM_SPS_MODE) {
+				val = hw_cread(CAP_ENDPTPIPEID +
+					mEp->num * sizeof(u32),
+					~0);
+
+				if (val != MSM_EP_PIPE_ID_RESET_VAL)
+					hw_cwrite(
+						CAP_ENDPTPIPEID +
+						 mEp->num * sizeof(u32),
+						~0, MSM_EP_PIPE_ID_RESET_VAL);
+			}
+		}
 		mReq->req.status = -ESHUTDOWN;
+
+		if (mReq->map) {
+			dma_unmap_single(mEp->device, mReq->req.dma,
+				mReq->req.length,
+				mEp->dir ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+			mReq->req.dma = 0;
+			mReq->map     = 0;
+		}
 
 		if (mReq->req.complete != NULL) {
 			spin_unlock(mEp->lock);
@@ -2680,6 +2762,13 @@ static const struct usb_ep_ops usb_ep_ops = {
 	.fifo_flush    = ep_fifo_flush,
 };
 
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+extern void pantech_init_device_mode_change(void);
+extern bool b_pantech_usb_module;
+extern int pantech_vbus_connect(void);
+extern int pantech_vbus_disconnect(void);
+#endif
+
 /******************************************************************************
  * GADGET block
  *****************************************************************************/
@@ -2689,25 +2778,45 @@ static int ci13xxx_vbus_session(struct usb_gadget *_gadget, int is_active)
 	unsigned long flags;
 	int gadget_ready = 0;
 
-	if (!(udc->udc_driver->flags & CI13XXX_PULLUP_ON_VBUS))
+	if (!(udc->udc_driver->flags & CI13XXX_PULLUP_ON_VBUS)){
+		printk(KERN_INFO "vbus_session Out!!!!!\n");	
 		return -EOPNOTSUPP;
+	}
 
 	spin_lock_irqsave(udc->lock, flags);
 	udc->vbus_active = is_active;
 	if (udc->driver)
 		gadget_ready = 1;
 	spin_unlock_irqrestore(udc->lock, flags);
-
+	
+	printk(KERN_INFO "vbus_gadget SOFT connect : [%d]!!!!!!\n", udc->softconnect);
 	if (gadget_ready) {
 		if (is_active) {
+			printk(KERN_INFO "vbus_gadget connect!!!!!!\n");
 			pm_runtime_get_sync(&_gadget->dev);
 			hw_device_reset(udc);
-			if (udc->softconnect)
+						
+			if (udc->softconnect){
 				hw_device_state(udc->ep0out.qh.dma);
+				
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+				if(b_pantech_usb_module){
+						pantech_vbus_connect();
+				}
+#endif
+			}
+
 		} else {
+			printk(KERN_INFO "vbus_gadget disconnect!!!!!!\n");
 			hw_device_state(0);
 			_gadget_stop_activity(&udc->gadget);
 			pm_runtime_put_sync(&_gadget->dev);
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+			if(b_pantech_usb_module){
+				pantech_vbus_disconnect();
+			}
+#endif
+
 		}
 	}
 
@@ -2727,6 +2836,10 @@ static int ci13xxx_pullup(struct usb_gadget *_gadget, int is_active)
 {
 	struct ci13xxx *udc = container_of(_gadget, struct ci13xxx, gadget);
 	unsigned long flags;
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+	pantech_init_device_mode_change();
+#endif
 
 	spin_lock_irqsave(udc->lock, flags);
 	udc->softconnect = is_active;
@@ -2773,6 +2886,7 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	unsigned long flags;
 	int i, j;
 	int retval = -ENOMEM;
+	bool put = false;
 
 	trace("%p", driver);
 
@@ -2862,6 +2976,7 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	udc->softconnect = 1;
 
 	spin_unlock_irqrestore(udc->lock, flags);
+	pm_runtime_get_sync(&udc->gadget.dev);
 	retval = bind(&udc->gadget);                /* MAY SLEEP */
 	spin_lock_irqsave(udc->lock, flags);
 
@@ -2871,26 +2986,27 @@ int usb_gadget_probe_driver(struct usb_gadget_driver *driver,
 	}
 
 	udc->driver = driver;
-	pm_runtime_get_sync(&udc->gadget.dev);
 	if (udc->udc_driver->flags & CI13XXX_PULLUP_ON_VBUS) {
 		if (udc->vbus_active) {
 			if (udc->udc_driver->flags & CI13XXX_REGS_SHARED)
 				hw_device_reset(udc);
 		} else {
-			pm_runtime_put_sync(&udc->gadget.dev);
+			put = true;
 			goto done;
 		}
 	}
 
-	if (!udc->softconnect)
+	if (!udc->softconnect) {
+		put = true;
 		goto done;
+	}
 
 	retval = hw_device_state(udc->ep0out.qh.dma);
-	if (retval)
-		pm_runtime_put_sync(&udc->gadget.dev);
 
  done:
 	spin_unlock_irqrestore(udc->lock, flags);
+	if (retval || put)
+		pm_runtime_put_sync(&udc->gadget.dev);
 	return retval;
 }
 EXPORT_SYMBOL(usb_gadget_probe_driver);

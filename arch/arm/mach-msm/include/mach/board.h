@@ -1,7 +1,7 @@
 /* arch/arm/mach-msm/include/mach/board.h
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -61,6 +61,11 @@ struct msm_camera_device_platform_data {
 	struct msm_camera_io_ext ioext;
 	struct msm_camera_io_clk ioclk;
 	uint8_t csid_core;
+	uint8_t is_csiphy;
+	uint8_t is_csic;
+	uint8_t is_csid;
+	uint8_t is_ispif;
+	uint8_t is_vpe;
 	struct msm_bus_scale_pdata *cam_bus_scale_table;
 };
 enum msm_camera_csi_data_format {
@@ -93,7 +98,7 @@ struct msm_camera_legacy_device_platform_data {
 #define MSM_CAMERA_FLASH_SRC_PWM  (0x00000001<<1)
 #define MSM_CAMERA_FLASH_SRC_CURRENT_DRIVER	(0x00000001<<2)
 #define MSM_CAMERA_FLASH_SRC_EXT     (0x00000001<<3)
-
+#define MSM_CAMERA_FLASH_SRC_LED (0x00000001<<3)
 
 struct msm_camera_sensor_flash_pmic {
 	uint8_t num_of_src;
@@ -125,6 +130,11 @@ struct msm_camera_sensor_flash_external {
 	struct msm_cam_expander_info *expander_info;
 };
 
+struct msm_camera_sensor_flash_led {
+	const char *led_name;
+	const int led_name_len;
+};
+
 struct msm_camera_sensor_flash_src {
 	int flash_sr_type;
 
@@ -135,6 +145,7 @@ struct msm_camera_sensor_flash_src {
 			current_driver_src;
 		struct msm_camera_sensor_flash_external
 			ext_driver_src;
+		struct msm_camera_sensor_flash_led led_src;
 	} _fsrc;
 };
 
@@ -161,26 +172,43 @@ enum msm_camera_type {
 	BACK_CAMERA_INT_3D,
 };
 
-struct msm8960_privacy_light_cfg {
-	unsigned mpp;
+enum camera_vreg_type {
+	REG_LDO,
+	REG_VS,
 };
 
-struct msm_camera_sensor_platform_info {
-	int mount_angle;
-	int sensor_reset_enable;
-	int sensor_reset;
-	int sensor_pwd;
-	int vcm_pwd;
-	int vcm_enable;
-	int privacy_light;
-	void *privacy_light_info;
+struct camera_vreg_t {
+	char *reg_name;
+	enum camera_vreg_type type;
+	int min_voltage;
+	int max_voltage;
+	int op_mode;
+};
+
+struct msm_gpio_set_tbl {
+	unsigned gpio;
+	unsigned long flags;
+	uint32_t delay;
 };
 
 struct msm_camera_gpio_conf {
 	void *cam_gpiomux_conf_tbl;
 	uint8_t cam_gpiomux_conf_tbl_size;
-	uint16_t *cam_gpio_tbl;
-	uint8_t cam_gpio_tbl_size;
+	struct gpio *cam_gpio_common_tbl;
+	uint8_t cam_gpio_common_tbl_size;
+	struct gpio *cam_gpio_req_tbl;
+	uint8_t cam_gpio_req_tbl_size;
+	struct msm_gpio_set_tbl *cam_gpio_set_tbl;
+	uint8_t cam_gpio_set_tbl_size;
+};
+
+struct msm_camera_sensor_platform_info {
+	int mount_angle;
+	int sensor_reset;
+	struct camera_vreg_t *cam_vreg;
+	int num_vreg;
+	int32_t (*ext_power_ctrl) (int enable);
+	struct msm_camera_gpio_conf *gpio_conf;
 };
 
 struct msm_actuator_info {
@@ -208,9 +236,13 @@ struct msm_camera_sensor_info {
 	struct msm_camera_csi_params csi_params;
 	struct msm_camera_sensor_strobe_flash_data *strobe_flash_data;
 	char *eeprom_data;
-	struct msm_camera_gpio_conf *gpio_conf;
 	enum msm_camera_type camera_type;
 	struct msm_actuator_info *actuator_info;
+};
+
+struct msm_camera_board_info {
+	struct i2c_board_info *board_info;
+	uint8_t num_i2c_board_info;
 };
 
 int msm_get_cam_resources(struct msm_camera_sensor_info *);
@@ -305,8 +337,13 @@ struct msm_panel_common_pdata {
 	struct msm_bus_scale_pdata *mdp_bus_scale_table;
 #endif
 	int mdp_rev;
-	int (*writeback_offset)(void);
+	u32 ov0_wb_size;  /* overlay0 writeback size */
+	u32 ov1_wb_size;  /* overlay1 writeback size */
+	u32 mem_hid;
+	char cont_splash_enabled;
 };
+
+
 
 struct lcdc_platform_data {
 	int (*lcdc_gpio_config)(int on);
@@ -358,12 +395,16 @@ struct mipi_dsi_panel_platform_data {
 	int fpga_3d_config_addr;
 	int *gpio;
 	struct mipi_dsi_phy_ctrl *phy_ctrl_settings;
+	void (*dsi_pwm_cfg)(void);
 };
 
+#define PANEL_NAME_MAX_LEN 50
 struct msm_fb_platform_data {
 	int (*detect_client)(const char *name);
 	int mddi_prescan;
 	int (*allow_set_offset)(void);
+	char prim_panel_name[PANEL_NAME_MAX_LEN];
+	char ext_panel_name[PANEL_NAME_MAX_LEN];
 };
 
 struct msm_hdmi_platform_data {
@@ -398,6 +439,9 @@ struct msm_i2c_ssbi_platform_data {
 
 struct msm_vidc_platform_data {
 	int memtype;
+	u32 enable_ion;
+	int disable_dmx;
+	int disable_fullhd;
 #ifdef CONFIG_MSM_BUS_SCALING
 	struct msm_bus_scale_pdata *vidc_bus_client_pdata;
 #endif
@@ -428,6 +472,8 @@ void msm_map_copper_io(void);
 void msm_init_irq(void);
 void msm_copper_init_irq(void);
 void vic_handle_irq(struct pt_regs *regs);
+void msm_copper_reserve(void);
+void msm_copper_very_early(void);
 
 struct mmc_platform_data;
 int msm_add_sdcc(unsigned int controller,

@@ -66,7 +66,11 @@ int soc_dsp_debugfs_add(struct snd_soc_pcm_runtime *rtd);
  * It can be used to eliminate pops between different playback streams, e.g.
  * between two audio tracks.
  */
+#ifdef CONFIG_PANTECH_SND
+static int pmdown_time;     // QUALCOMM 117474 CR Patch (kim.sungkeun@LS1 12.04.20)
+#else
 static int pmdown_time = 5000;
+#endif
 module_param(pmdown_time, int, 0);
 MODULE_PARM_DESC(pmdown_time, "DAPM stream powerdown time (msecs)");
 
@@ -794,9 +798,21 @@ int soc_pcm_close(struct snd_pcm_substream *substream)
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		/* start delayed pop wq here for playback streams */
-		codec_dai->pop_wait = 1;
-		schedule_delayed_work(&rtd->delayed_work,
+#if 0 // def CONFIG_SND_SOC //20120416 jhsong : QCT patch CRs-fixed: 351956
+		snd_soc_dapm_stream_event(rtd,
+ 			codec_dai->driver->playback.stream_name,
+ 			SND_SOC_DAPM_STREAM_STOP);
+#else
+		if (rtd->pmdown_time) {
+			codec_dai->pop_wait = 1;
+			schedule_delayed_work(&rtd->delayed_work,
 			msecs_to_jiffies(rtd->pmdown_time));
+		} else {
+			snd_soc_dapm_stream_event(rtd,
+			codec_dai->driver->playback.stream_name,
+			SND_SOC_DAPM_STREAM_STOP);
+		}
+#endif
 	} else {
 		/* capture streams can be powered down now */
 		snd_soc_dapm_stream_event(rtd,
@@ -1138,6 +1154,11 @@ int snd_soc_suspend(struct device *dev)
 	struct snd_soc_codec *codec;
 	int i;
 
+	if (!card->instantiated) {
+		dev_dbg(card->dev, "uninsantiated card found card->name = %s\n",
+			card->name);
+		return 0;
+	}
 	/* If the initialization of this soc device failed, there is no codec
 	 * associated with it. Just bail out in this case.
 	 */
@@ -1391,6 +1412,11 @@ int snd_soc_resume(struct device *dev)
 	struct snd_soc_card *card = dev_get_drvdata(dev);
 	int i, ac97_control = 0;
 
+	if (!card->instantiated) {
+		dev_dbg(card->dev, "uninsantiated card found card->name = %s\n",
+			card->name);
+		return 0;
+	}
 	/* AC97 devices might have other drivers hanging off them so
 	 * need to resume immediately.  Other drivers don't have that
 	 * problem and may take a substantial amount of time to resume
@@ -3047,6 +3073,39 @@ int snd_soc_info_volsw(struct snd_kcontrol *kcontrol,
 EXPORT_SYMBOL_GPL(snd_soc_info_volsw);
 
 /**
+ * snd_soc_info_multi_ext - external single mixer info callback
+ * @kcontrol: mixer control
+ * @uinfo: control element information
+ *
+ * Callback to provide information about a single external mixer control.
+ * that accepts multiple input.
+ *
+ * Returns 0 for success.
+ */
+int snd_soc_info_multi_ext(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_info *uinfo)
+{
+	struct soc_multi_mixer_control *mc =
+		(struct soc_multi_mixer_control *)kcontrol->private_value;
+	int platform_max;
+
+	if (!mc->platform_max)
+		mc->platform_max = mc->max;
+	platform_max = mc->platform_max;
+
+	if (platform_max == 1 && !strnstr(kcontrol->id.name, " Volume", 30))
+		uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
+	else
+		uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+
+	uinfo->count = mc->count;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = platform_max;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_info_multi_ext);
+
+/**
  * snd_soc_get_volsw - single mixer get callback
  * @kcontrol: mixer control
  * @ucontrol: control element information
@@ -3727,6 +3786,9 @@ int snd_soc_register_card(struct snd_soc_card *card)
 	card->instantiated = 0;
 	mutex_init(&card->mutex);
 	mutex_init(&card->dapm_mutex);
+#ifdef CONFIG_PANTECH_SND // Qualcomm Case 00850482 : fixed issue crashed in dapm_generic_check_power while boot up
+	mutex_init(&card->dapm_power_mutex);
+#endif
 	mutex_init(&card->dsp_mutex);
 
 	mutex_lock(&client_mutex);

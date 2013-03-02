@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -51,8 +51,8 @@ static struct msm_camera_i2c_reg_conf imx074_prev_settings[] = {
 	{0x0383, 0x03}, /*x_odd_inc*/
 	{0x0385, 0x01}, /*y_even_inc*/
 	{0x0387, 0x03}, /*y_odd_inc*/
-	{0x3001, 0x00}, /*hmodeadd*/
-	{0x3016, 0x06}, /*vmodeadd*/
+	{0x3001, 0x80}, /*hmodeadd*/
+	{0x3016, 0x16}, /*vmodeadd*/
 	{0x3069, 0x24}, /*vapplinepos_start*/
 	{0x306b, 0x53}, /*vapplinepos_end*/
 	{0x3086, 0x00}, /*shutter*/
@@ -164,7 +164,7 @@ static struct msm_sensor_output_info_t imx074_dimensions[] = {
 		.frame_length_lines = 0x62D,
 		.vt_pixel_clk = 216000000,
 		.op_pixel_clk = 216000000,
-		.binning_factor = 1,
+		.binning_factor = 2,
 	},
 };
 
@@ -211,22 +211,7 @@ static struct msm_sensor_exp_gain_info_t imx074_exp_gain_info = {
 	.vert_offset = 3,
 };
 
-static int imx074_sensor_config(void __user *argp)
-{
-	return msm_sensor_config(&imx074_s_ctrl, argp);
-}
-
 static struct sensor_calib_data imx074_calib_data;
-
-static int imx074_sensor_open_init(const struct msm_camera_sensor_info *data)
-{
-	return msm_sensor_open_init(&imx074_s_ctrl, data);
-}
-
-static int imx074_sensor_release(void)
-{
-	return msm_sensor_release(&imx074_s_ctrl);
-}
 
 static const struct i2c_device_id imx074_i2c_id[] = {
 	{SENSOR_NAME, (kernel_ulong_t)&imx074_s_ctrl},
@@ -276,31 +261,16 @@ static struct msm_camera_eeprom_client imx074_eeprom_client = {
 	.data_tbl_size = ARRAY_SIZE(imx074_eeprom_data_tbl),
 };
 
-static int imx074_sensor_v4l2_probe(const struct msm_camera_sensor_info *info,
-	struct v4l2_subdev *sdev, struct msm_sensor_ctrl *s)
-{
-	return msm_sensor_v4l2_probe(&imx074_s_ctrl, info, sdev, s);
-}
-
-static int imx074_probe(struct platform_device *pdev)
-{
-	return msm_sensor_register(pdev, imx074_sensor_v4l2_probe);
-}
-
-struct platform_driver imx074_driver = {
-	.probe = imx074_probe,
-	.driver = {
-		.name = PLATFORM_DRIVER_NAME,
-		.owner = THIS_MODULE,
-	},
-};
-
 static int __init msm_sensor_init_module(void)
 {
-	return platform_driver_register(&imx074_driver);
+	return i2c_add_driver(&imx074_i2c_driver);
 }
 
-static struct v4l2_subdev_core_ops imx074_subdev_core_ops;
+static struct v4l2_subdev_core_ops imx074_subdev_core_ops = {
+	.ioctl = msm_sensor_subdev_ioctl,
+	.s_power = msm_sensor_power,
+};
+
 static struct v4l2_subdev_video_ops imx074_subdev_video_ops = {
 	.enum_mbus_fmt = msm_sensor_v4l2_enum_fmt,
 };
@@ -315,12 +285,6 @@ static struct msm_sensor_fn_t imx074_func_tbl = {
 	.sensor_stop_stream = msm_sensor_stop_stream,
 	.sensor_group_hold_on = msm_sensor_group_hold_on,
 	.sensor_group_hold_off = msm_sensor_group_hold_off,
-	.sensor_get_prev_lines_pf = msm_sensor_get_prev_lines_pf,
-	.sensor_get_prev_pixels_pl = msm_sensor_get_prev_pixels_pl,
-	.sensor_get_pict_lines_pf = msm_sensor_get_pict_lines_pf,
-	.sensor_get_pict_pixels_pl = msm_sensor_get_pict_pixels_pl,
-	.sensor_get_pict_max_exp_lc = msm_sensor_get_pict_max_exp_lc,
-	.sensor_get_pict_fps = msm_sensor_get_pict_fps,
 	.sensor_set_fps = msm_sensor_set_fps,
 	.sensor_write_exp_gain = msm_sensor_write_exp_gain1,
 	.sensor_write_snapshot_exp_gain = msm_sensor_write_exp_gain1,
@@ -328,12 +292,9 @@ static struct msm_sensor_fn_t imx074_func_tbl = {
 	.sensor_set_sensor_mode = msm_sensor_set_sensor_mode,
 	.sensor_mode_init = msm_sensor_mode_init,
 	.sensor_get_output_info = msm_sensor_get_output_info,
-	.sensor_config = imx074_sensor_config,
-	.sensor_open_init = imx074_sensor_open_init,
-	.sensor_release = imx074_sensor_release,
+	.sensor_config = msm_sensor_config,
 	.sensor_power_up = msm_sensor_power_up,
 	.sensor_power_down = msm_sensor_power_down,
-	.sensor_probe = msm_sensor_probe,
 };
 
 static struct msm_sensor_reg_t imx074_regs = {
@@ -370,6 +331,7 @@ static struct msm_sensor_ctrl_t imx074_s_ctrl = {
 	.sensor_v4l2_subdev_info_size = ARRAY_SIZE(imx074_subdev_info),
 	.sensor_v4l2_subdev_ops = &imx074_subdev_ops,
 	.func_tbl = &imx074_func_tbl,
+	.clk_rate = MSM_SENSOR_MCLK_24HZ,
 };
 
 module_init(msm_sensor_init_module);

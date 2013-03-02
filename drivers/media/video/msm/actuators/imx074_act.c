@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,7 +12,6 @@
  */
 
 #include "msm_actuator.h"
-#include "msm_logging.h"
 #include "msm_camera_i2c.h"
 
 #define	IMX074_TOTAL_STEPS_NEAR_TO_FAR			41
@@ -88,6 +87,42 @@ int32_t imx074_act_write_focus(
 
 	rc = a_ctrl->func_tbl.actuator_i2c_write(a_ctrl, dac_value, NULL);
 
+	return rc;
+}
+
+int32_t imx074_act_move_focus(
+	struct msm_actuator_ctrl_t *a_ctrl,
+	int dir,
+	int32_t num_steps)
+{
+	int32_t step_direction, dest_step_position, bit_mask;
+	int32_t rc = 0;
+
+	if (num_steps == 0)
+		return rc;
+
+	if (dir == MOVE_NEAR) {
+		step_direction = 1;
+		bit_mask = 0x80;
+	} else if (dir == MOVE_FAR) {
+		step_direction = -1;
+		bit_mask = 0x00;
+	} else {
+		CDBG("imx074_move_focus: Illegal focus direction");
+		return -EINVAL;
+	}
+	dest_step_position = a_ctrl->curr_step_pos +
+		(step_direction * num_steps);
+	if (dest_step_position < 0)
+		dest_step_position = 0;
+	else if (dest_step_position > IMX074_TOTAL_STEPS_NEAR_TO_FAR)
+		dest_step_position = IMX074_TOTAL_STEPS_NEAR_TO_FAR;
+
+	msm_camera_i2c_write(&a_ctrl->i2c_client,
+		0x00,
+		((num_steps * g_regions[0].code_per_step) | bit_mask),
+		MSM_CAMERA_I2C_BYTE_DATA);
+	a_ctrl->curr_step_pos = dest_step_position;
 	return rc;
 }
 
@@ -187,14 +222,20 @@ static struct v4l2_subdev_ops imx074_act_subdev_ops = {
 };
 
 static int32_t imx074_act_create_subdevice(
-	void *board_info,
+	void *act_info,
 	void *sdev)
 {
+	struct msm_actuator_info *info = (struct msm_actuator_info *)act_info;
 	LINFO("%s called\n", __func__);
 
 	return (int) msm_actuator_create_subdevice(&imx074_act_t,
-		(struct i2c_board_info const *)board_info,
+		(struct i2c_board_info const *)info->board_info,
 		(struct v4l2_subdev *)sdev);
+}
+
+static int imx074_act_power_down(void *act_info)
+{
+	return (int) msm_actuator_af_power_down(&imx074_act_t);
 }
 
 static struct msm_actuator_ctrl_t imx074_act_t = {
@@ -205,6 +246,7 @@ static struct msm_actuator_ctrl_t imx074_act_t = {
 		.a_init_table = imx074_i2c_add_driver_table,
 		.a_create_subdevice = imx074_act_create_subdevice,
 		.a_config = imx074_act_config,
+		.a_power_down = imx074_act_power_down,
 	},
 
 	.i2c_client = {
@@ -222,7 +264,7 @@ static struct msm_actuator_ctrl_t imx074_act_t = {
 
 	.func_tbl = {
 		.actuator_init_table = msm_actuator_init_table,
-		.actuator_move_focus = msm_actuator_move_focus,
+		.actuator_move_focus = imx074_act_move_focus,
 		.actuator_write_focus = imx074_act_write_focus,
 		.actuator_set_default_focus = imx074_set_default_focus,
 		.actuator_init_focus = imx074_act_init_focus,
@@ -238,6 +280,10 @@ static struct msm_actuator_ctrl_t imx074_act_t = {
 		.f_pix_den = 10,
 		.total_f_dist_num = 197681,
 		.total_f_dist_den = 1000,
+		.hor_view_angle_num = 548,
+		.hor_view_angle_den = 10,
+		.ver_view_angle_num = 425,
+		.ver_view_angle_den = 10,
 	},
 
 	/* Initialize scenario */

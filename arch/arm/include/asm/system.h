@@ -62,13 +62,6 @@
 
 #include <asm/outercache.h>
 
-#define __exception	__attribute__((section(".exception.text")))
-#ifdef CONFIG_FUNCTION_GRAPH_TRACER
-#define __exception_irq_entry	__irq_entry
-#else
-#define __exception_irq_entry	__exception
-#endif
-
 void cpu_idle_wait(void);
 
 struct thread_info;
@@ -105,7 +98,12 @@ extern asmlinkage void c_backtrace(unsigned long fp, int pmode);
 struct mm_struct;
 extern void show_pte(struct mm_struct *mm, unsigned long addr);
 extern void __show_regs(struct pt_regs *);
-
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+extern struct pt_regs *__get_regs_crashed(void);
+extern void __save_regs_and_mmu(struct pt_regs *);
+extern void (*arm_crash_reset)(void);
+extern void printcrash(const char *fmt, ...);
+#endif
 extern int cpu_architecture(void);
 extern void cpu_init(void);
 

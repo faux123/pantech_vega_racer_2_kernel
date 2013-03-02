@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,17 +24,15 @@
 
 /* PMIC8xxx IRQ */
 
-#define	SSBI_REG_ADDR_IRQ_BASE		0x1BB
-
-#define	SSBI_REG_ADDR_IRQ_ROOT		(SSBI_REG_ADDR_IRQ_BASE + 0)
-#define	SSBI_REG_ADDR_IRQ_M_STATUS1	(SSBI_REG_ADDR_IRQ_BASE + 1)
-#define	SSBI_REG_ADDR_IRQ_M_STATUS2	(SSBI_REG_ADDR_IRQ_BASE + 2)
-#define	SSBI_REG_ADDR_IRQ_M_STATUS3	(SSBI_REG_ADDR_IRQ_BASE + 3)
-#define	SSBI_REG_ADDR_IRQ_M_STATUS4	(SSBI_REG_ADDR_IRQ_BASE + 4)
-#define	SSBI_REG_ADDR_IRQ_BLK_SEL	(SSBI_REG_ADDR_IRQ_BASE + 5)
-#define	SSBI_REG_ADDR_IRQ_IT_STATUS	(SSBI_REG_ADDR_IRQ_BASE + 6)
-#define	SSBI_REG_ADDR_IRQ_CONFIG	(SSBI_REG_ADDR_IRQ_BASE + 7)
-#define	SSBI_REG_ADDR_IRQ_RT_STATUS	(SSBI_REG_ADDR_IRQ_BASE + 8)
+#define SSBI_REG_ADDR_IRQ_ROOT(base)		(base + 0)
+#define SSBI_REG_ADDR_IRQ_M_STATUS1(base)	(base + 1)
+#define SSBI_REG_ADDR_IRQ_M_STATUS2(base)	(base + 2)
+#define SSBI_REG_ADDR_IRQ_M_STATUS3(base)	(base + 3)
+#define SSBI_REG_ADDR_IRQ_M_STATUS4(base)	(base + 4)
+#define SSBI_REG_ADDR_IRQ_BLK_SEL(base)		(base + 5)
+#define SSBI_REG_ADDR_IRQ_IT_STATUS(base)	(base + 6)
+#define SSBI_REG_ADDR_IRQ_CONFIG(base)		(base + 7)
+#define SSBI_REG_ADDR_IRQ_RT_STATUS(base)	(base + 8)
 
 #define	PM_IRQF_LVL_SEL			0x01	/* level select */
 #define	PM_IRQF_MASK_FE			0x02	/* mask falling edge */
@@ -50,6 +48,7 @@
 struct pm_irq_chip {
 	struct device		*dev;
 	spinlock_t		pm_irq_lock;
+	unsigned int		base_addr;
 	unsigned int		devirq;
 	unsigned int		irq_base;
 	unsigned int		num_irqs;
@@ -60,13 +59,14 @@ struct pm_irq_chip {
 
 static int pm8xxx_read_root_irq(const struct pm_irq_chip *chip, u8 *rp)
 {
-	return pm8xxx_readb(chip->dev, SSBI_REG_ADDR_IRQ_ROOT, rp);
+	return pm8xxx_readb(chip->dev,
+			SSBI_REG_ADDR_IRQ_ROOT(chip->base_addr), rp);
 }
 
 static int pm8xxx_read_master_irq(const struct pm_irq_chip *chip, u8 m, u8 *bp)
 {
 	return pm8xxx_readb(chip->dev,
-			SSBI_REG_ADDR_IRQ_M_STATUS1 + m, bp);
+			SSBI_REG_ADDR_IRQ_M_STATUS1(chip->base_addr) + m, bp);
 }
 
 static int pm8xxx_read_block_irq(struct pm_irq_chip *chip, u8 bp, u8 *ip)
@@ -74,13 +74,15 @@ static int pm8xxx_read_block_irq(struct pm_irq_chip *chip, u8 bp, u8 *ip)
 	int	rc;
 
 	spin_lock(&chip->pm_irq_lock);
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_BLK_SEL, bp);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_BLK_SEL(chip->base_addr), bp);
 	if (rc) {
 		pr_err("Failed Selecting Block %d rc=%d\n", bp, rc);
 		goto bail;
 	}
 
-	rc = pm8xxx_readb(chip->dev, SSBI_REG_ADDR_IRQ_IT_STATUS, ip);
+	rc = pm8xxx_readb(chip->dev,
+			SSBI_REG_ADDR_IRQ_IT_STATUS(chip->base_addr), ip);
 	if (rc)
 		pr_err("Failed Reading Status rc=%d\n", rc);
 bail:
@@ -93,17 +95,20 @@ static int pm8xxx_read_config_irq(struct pm_irq_chip *chip, u8 bp, u8 cp, u8 *r)
 	int	rc;
 
 	spin_lock(&chip->pm_irq_lock);
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_BLK_SEL, bp);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_BLK_SEL(chip->base_addr), bp);
 	if (rc) {
 		pr_err("Failed Selecting Block %d rc=%d\n", bp, rc);
 		goto bail;
 	}
 
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_CONFIG, cp);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_CONFIG(chip->base_addr), cp);
 	if (rc)
 		pr_err("Failed Configuring IRQ rc=%d\n", rc);
 
-	rc = pm8xxx_readb(chip->dev, SSBI_REG_ADDR_IRQ_CONFIG, r);
+	rc = pm8xxx_readb(chip->dev,
+			SSBI_REG_ADDR_IRQ_CONFIG(chip->base_addr), r);
 	if (rc)
 		pr_err("Failed reading IRQ rc=%d\n", rc);
 bail:
@@ -116,14 +121,16 @@ static int pm8xxx_write_config_irq(struct pm_irq_chip *chip, u8 bp, u8 cp)
 	int	rc;
 
 	spin_lock(&chip->pm_irq_lock);
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_BLK_SEL, bp);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_BLK_SEL(chip->base_addr), bp);
 	if (rc) {
 		pr_err("Failed Selecting Block %d rc=%d\n", bp, rc);
 		goto bail;
 	}
 
 	cp |= PM_IRQF_WRITE;
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_CONFIG, cp);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_CONFIG(chip->base_addr), cp);
 	if (rc)
 		pr_err("Failed Configuring IRQ rc=%d\n", rc);
 bail:
@@ -214,6 +221,11 @@ static void pm8xxx_irq_mask(struct irq_data *d)
 	master = block / 8;
 	irq_bit = pmirq % 8;
 
+	if (chip->config[pmirq] == 0) {
+		pr_warn("masking rouge irq=%d pmirq=%d\n", d->irq, pmirq);
+		chip->config[pmirq] = irq_bit << PM_IRQF_BITS_SHIFT;
+	}
+
 	config = chip->config[pmirq] | PM_IRQF_MASK_ALL;
 	pm8xxx_write_config_irq(chip, block, config);
 }
@@ -228,6 +240,11 @@ static void pm8xxx_irq_mask_ack(struct irq_data *d)
 	block = pmirq / 8;
 	master = block / 8;
 	irq_bit = pmirq % 8;
+
+	if (chip->config[pmirq] == 0) {
+		pr_warn("mask acking rouge irq=%d pmirq=%d\n", d->irq, pmirq);
+		chip->config[pmirq] = irq_bit << PM_IRQF_BITS_SHIFT;
+	}
 
 	config = chip->config[pmirq] | PM_IRQF_MASK_ALL | PM_IRQF_CLR;
 	pm8xxx_write_config_irq(chip, block, config);
@@ -335,14 +352,16 @@ int pm8xxx_get_irq_stat(struct pm_irq_chip *chip, int irq)
 
 	spin_lock_irqsave(&chip->pm_irq_lock, flags);
 
-	rc = pm8xxx_writeb(chip->dev, SSBI_REG_ADDR_IRQ_BLK_SEL, block);
+	rc = pm8xxx_writeb(chip->dev,
+			SSBI_REG_ADDR_IRQ_BLK_SEL(chip->base_addr), block);
 	if (rc) {
 		pr_err("Failed Selecting block irq=%d pmirq=%d blk=%d rc=%d\n",
 			irq, pmirq, block, rc);
 		goto bail_out;
 	}
 
-	rc = pm8xxx_readb(chip->dev, SSBI_REG_ADDR_IRQ_RT_STATUS, &bits);
+	rc = pm8xxx_readb(chip->dev,
+			SSBI_REG_ADDR_IRQ_RT_STATUS(chip->base_addr), &bits);
 	if (rc) {
 		pr_err("Failed Configuring irq=%d pmirq=%d blk=%d rc=%d\n",
 			irq, pmirq, block, rc);
@@ -388,6 +407,7 @@ struct pm_irq_chip *  __devinit pm8xxx_irq_init(struct device *dev,
 	chip->devirq = devirq;
 	chip->irq_base = pdata->irq_base;
 	chip->num_irqs = pdata->irq_cdata.nirqs;
+	chip->base_addr = pdata->irq_cdata.base_addr;
 	chip->num_blocks = DIV_ROUND_UP(chip->num_irqs, 8);
 	chip->num_masters = DIV_ROUND_UP(chip->num_blocks, 8);
 	spin_lock_init(&chip->pm_irq_lock);

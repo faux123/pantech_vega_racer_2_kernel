@@ -536,8 +536,10 @@ void msm_gpio_show_resume_irq(void)
 	unsigned long irq_flags;
 	int i, irq, intstat;
 
+#if 0 //lee.eunsuk test
 	if (!msm_show_resume_irq_mask)
 		return;
+#endif 
 
 	spin_lock_irqsave(&tlmm_lock, irq_flags);
 	for_each_set_bit(i, msm_gpio.wake_irqs, NR_MSM_GPIOS) {

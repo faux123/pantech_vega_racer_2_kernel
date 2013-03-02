@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,6 +39,7 @@
 #define FORMAT_WMA_V9	    0x000f
 #define FORMAT_AMR_WB_PLUS  0x0010
 #define FORMAT_MPEG4_MULTI_AAC 0x0011
+#define FORMAT_MULTI_CHANNEL_LINEAR_PCM 0x0012
 
 #define ENCDEC_SBCBITRATE   0x0001
 #define ENCDEC_IMMEDIATE_DECODE 0x0002
@@ -147,6 +148,8 @@ void q6asm_audio_client_free(struct audio_client *ac);
 
 struct audio_client *q6asm_audio_client_alloc(app_cb cb, void *priv);
 
+struct audio_client *q6asm_get_audio_client(int session_id);
+
 int q6asm_audio_client_buf_alloc(unsigned int dir/* 1:Out,0:In */,
 				struct audio_client *ac,
 				unsigned int bufsz,
@@ -236,8 +239,14 @@ int q6asm_enc_cfg_blk_evrc(struct audio_client *ac, uint32_t frames_per_buf,
 int q6asm_enc_cfg_blk_amrnb(struct audio_client *ac, uint32_t frames_per_buf,
 		uint16_t band_mode, uint16_t dtx_enable);
 
+int q6asm_enc_cfg_blk_amrwb(struct audio_client *ac, uint32_t frames_per_buf,
+		uint16_t band_mode, uint16_t dtx_enable);
+
 int q6asm_media_format_block_pcm(struct audio_client *ac,
 			uint32_t rate, uint32_t channels);
+
+int q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
+				uint32_t rate, uint32_t channels);
 
 int q6asm_media_format_block_aac(struct audio_client *ac,
 			struct asm_aac_cfg *cfg);
@@ -280,5 +289,9 @@ int q6asm_set_io_mode(struct audio_client *ac, uint32_t mode);
 /* Get Service ID for APR communication */
 int q6asm_get_apr_service_id(int session_id);
 #endif
+
+/* Common format block without any payload
+*/
+int q6asm_media_format_block(struct audio_client *ac, uint32_t format);
 
 #endif /* __Q6_ASM_H__ */

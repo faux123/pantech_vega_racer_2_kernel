@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -91,21 +91,6 @@ enum vpe_state {
 	VPE_STATE_ACTIVE,
 };
 
-struct vpe_device_type {
-	/* device related. */
-	int   vpeirq;
-	void __iomem      *vpebase;
-	struct resource	  *vpemem;
-	struct resource   *vpeio;
-	void        *device_extdata;
-};
-
-struct dis_offset_type {
-	int32_t dis_offset_x;
-	int32_t dis_offset_y;
-	uint32_t frame_id;
-};
-
 struct vpe_ctrl_type {
 	spinlock_t        lock;
 	uint32_t          irq_status;
@@ -114,22 +99,24 @@ struct vpe_ctrl_type {
 	void              *extdata;
 	uint32_t          extlen;
 	struct msm_vpe_callback *resp;
-	uint32_t          in_h_w;
 	uint32_t          out_h;  /* this is BEFORE rotation. */
 	uint32_t          out_w;  /* this is BEFORE rotation. */
-	uint32_t          dis_en;
 	struct timespec   ts;
-	struct dis_offset_type   dis_offset;
-	uint32_t          pcbcr_before_dis;
-	uint32_t          pcbcr_dis_offset;
 	int               output_type;
 	int               frame_pack;
 	uint8_t           pad_2k_bool;
 	enum vpe_state    state;
 	unsigned long     out_y_addr;
 	unsigned long     out_cbcr_addr;
-	struct v4l2_subdev *subdev;
-	struct vpe_device_type device_data;
+	struct v4l2_subdev subdev;
+	struct platform_device *pdev;
+	struct resource   *vpeirq;
+	void __iomem      *vpebase;
+	struct resource	  *vpemem;
+	struct resource   *vpeio;
+	void        *device_extdata;
+	struct regulator *fs_vpe;
+	struct clk	*vpe_clk[2];
 	struct msm_mctl_pp_frame_info *pp_frame_info;
 };
 
@@ -151,7 +138,7 @@ struct vpe_src_xy_packed {
 
 struct vpe_input_plane_update_type {
 	struct vpe_src_size_packed             src_roi_size;
-	/* DIS updates this set. */
+	/* crop updates this set. */
 	struct vpe_src_xy_packed               src_roi_offset;
 	/* input address*/
 	uint8_t                         *src_p0_addr;

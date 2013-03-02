@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,9 +14,28 @@
 
 #include <linux/i2c.h>
 #include <mach/camera.h>
+#include <mach/gpio.h>
 #include <media/v4l2-subdev.h>
 #include <media/msm_camera.h>
 #include "msm_camera_i2c.h"
+
+#ifdef LERROR
+#undef LERROR
+#endif
+
+#ifdef LINFO
+#undef LINFO
+#endif
+
+#define LERROR(fmt, args...) pr_err(fmt, ##args)
+
+#define CONFIG_MSM_CAMERA_ACT_DBG 0
+
+#if CONFIG_MSM_CAMERA_ACT_DBG
+#define LINFO(fmt, args...) printk(fmt, ##args)
+#else
+#define LINFO(fmt, args...) CDBG(fmt, ##args)
+#endif
 
 struct msm_actuator_ctrl_t;
 
@@ -82,7 +101,13 @@ struct msm_actuator_ctrl_t {
 	uint16_t region_size;
 	struct damping_t *damping[2];
 	void *user_data;
+	uint32_t vcm_pwd;
+	uint32_t vcm_enable;
 };
+
+#ifdef CONFIG_OV8820_ACT// 1//CONFIG_PANTECH_CAMERA_AF_OFF_STEP
+extern struct msm_actuator_ctrl_t *AF_off_step_ctrl;
+#endif
 
 int32_t msm_actuator_i2c_write_b_af(struct msm_actuator_ctrl_t *a_ctrl,
 		uint8_t msb,

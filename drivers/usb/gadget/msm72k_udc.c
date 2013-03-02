@@ -116,6 +116,9 @@ struct msm_endpoint {
 	*/
 	unsigned char bit;
 	unsigned char num;
+	unsigned long dTD_update_fail_count;
+	unsigned long false_prime_fail_count;
+	unsigned actual_prime_fail_count;
 
 	unsigned wedged:1;
 	/* pointers to DMA transfer list area */
@@ -195,6 +198,7 @@ struct usb_info {
 	unsigned phy_status;
 	unsigned phy_fail_count;
 	unsigned prime_fail_count;
+	unsigned long dTD_update_fail_count;
 
 	struct usb_gadget		gadget;
 	struct usb_gadget_driver	*driver;
@@ -585,6 +589,7 @@ static void ept_prime_timer_func(unsigned long data)
 
 	spin_lock_irqsave(&ui->lock, flags);
 
+	ept->false_prime_fail_count++;
 	if ((readl_relaxed(USB_ENDPTPRIME) & n)) {
 		/*
 		 * ---- UNLIKELY ---
@@ -602,6 +607,7 @@ static void ept_prime_timer_func(unsigned long data)
 	rmb();
 	if (ept->req && (ept->req->item->info & INFO_ACTIVE)) {
 		ui->prime_fail_count++;
+		ept->actual_prime_fail_count++;
 		pr_err("%s(): ept%d%s prime failed. ept: config: %x"
 				"active: %x next: %x info: %x\n",
 				__func__, ept->num,
@@ -1103,6 +1109,7 @@ static void handle_endpoint(struct usb_info *ui, unsigned bit)
 	struct msm_endpoint *ept = ui->ept + bit;
 	struct msm_request *req;
 	unsigned long flags;
+	int req_dequeue = 1;
 	unsigned info;
 
 	/*
@@ -1111,7 +1118,6 @@ static void handle_endpoint(struct usb_info *ui, unsigned bit)
 		ept->req, ept->req ? ept->req->item_dma : 0);
 	*/
 
-	del_timer(&ept->prime_timer);
 	/* expire all requests that are no longer active */
 	spin_lock_irqsave(&ui->lock, flags);
 	while ((req = ept->req)) {
@@ -1123,13 +1129,25 @@ static void handle_endpoint(struct usb_info *ui, unsigned bit)
 			break;
 		}
 
+dequeue:
 		/* clean speculative fetches on req->item->info */
 		dma_coherent_post_ops();
 		info = req->item->info;
 		/* if the transaction is still in-flight, stop here */
-		if (info & INFO_ACTIVE)
-			break;
+		if (info & INFO_ACTIVE) {
+			if (req_dequeue) {
+				req_dequeue = 0;
+				ui->dTD_update_fail_count++;
+				ept->dTD_update_fail_count++;
+				udelay(10);
+				goto dequeue;
+			} else {
+				break;
+			}
+		}
+		req_dequeue = 0;
 
+		del_timer(&ept->prime_timer);
 		/* advance ept queue to the next request */
 		ept->req = req->next;
 		if (ept->req == 0)
@@ -1876,21 +1894,91 @@ const struct file_operations debug_wlocks_ops = {
 	.write = debug_write_release_wlocks,
 };
 
+static ssize_t debug_reprime_ep(struct file *file, const char __user *ubuf,
+				 size_t count, loff_t *ppos)
+{
+	struct usb_info *ui = file->private_data;
+	struct msm_endpoint *ept;
+	char kbuf[10];
+	unsigned int ep_num, dir;
+	unsigned long flags;
+	unsigned n, i;
+
+	memset(kbuf, 0, 10);
+
+	if (copy_from_user(kbuf, ubuf, count > 10 ? 10 : count))
+		return -EFAULT;
+
+	if (sscanf(kbuf, "%u %u", &ep_num, &dir) != 2)
+		return -EINVAL;
+
+	if (dir)
+		i = ep_num + 16;
+	else
+		i = ep_num;
+
+	spin_lock_irqsave(&ui->lock, flags);
+	ept = ui->ept + i;
+	n = 1 << ept->bit;
+
+	if ((readl_relaxed(USB_ENDPTPRIME) & n))
+		goto out;
+
+	if (readl_relaxed(USB_ENDPTSTAT) & n)
+		goto out;
+
+	/* clear speculative loads on item->info */
+	rmb();
+	if (ept->req && (ept->req->item->info & INFO_ACTIVE)) {
+		pr_err("%s(): ept%d%s prime failed. ept: config: %x"
+				"active: %x next: %x info: %x\n",
+				__func__, ept->num,
+				ept->flags & EPT_FLAG_IN ? "in" : "out",
+				ept->head->config, ept->head->active,
+				ept->head->next, ept->head->info);
+		writel_relaxed(n, USB_ENDPTPRIME);
+	}
+out:
+	spin_unlock_irqrestore(&ui->lock, flags);
+
+	return count;
+}
+
+static char buffer[512];
 static ssize_t debug_prime_fail_read(struct file *file, char __user *ubuf,
 				 size_t count, loff_t *ppos)
 {
 	struct usb_info *ui = file->private_data;
-	char kbuf[10];
-	size_t c = 0;
+	char *buf = buffer;
+	unsigned long flags;
+	struct msm_endpoint *ept;
+	int n;
+	int i = 0;
 
-	memset(kbuf, 0, 10);
+	spin_lock_irqsave(&ui->lock, flags);
+	for (n = 0; n < 32; n++) {
+		ept = ui->ept + n;
+		if (ept->ep.maxpacket == 0)
+			continue;
 
-	c = scnprintf(kbuf, 10, "%d", ui->prime_fail_count);
+		i += scnprintf(buf + i, PAGE_SIZE - i,
+			"ept%d %s false_prime_count=%lu prime_fail_count=%d dtd_fail_count=%lu\n",
+			ept->num, (ept->flags & EPT_FLAG_IN) ? "in " : "out",
+			ept->false_prime_fail_count,
+			ept->actual_prime_fail_count,
+			ept->dTD_update_fail_count);
+	}
 
-	if (copy_to_user(ubuf, kbuf, c))
-		return -EFAULT;
+	i += scnprintf(buf + i, PAGE_SIZE - i,
+			   "dTD_update_fail count: %lu\n",
+			    ui->dTD_update_fail_count);
 
-	return c;
+	i += scnprintf(buf + i, PAGE_SIZE - i,
+			   "prime_fail count: %d\n", ui->prime_fail_count);
+
+	spin_unlock_irqrestore(&ui->lock, flags);
+
+	return simple_read_from_buffer(ubuf, count, ppos, buf, i);
 }
 
 static int debug_prime_fail_open(struct inode *inode, struct file *file)
@@ -1902,6 +1990,7 @@ static int debug_prime_fail_open(struct inode *inode, struct file *file)
 const struct file_operations prime_fail_ops = {
 	.open = debug_prime_fail_open,
 	.read = debug_prime_fail_read,
+	.write = debug_reprime_ep,
 };
 
 static void usb_debugfs_init(struct usb_info *ui)
@@ -1916,7 +2005,7 @@ static void usb_debugfs_init(struct usb_info *ui)
 	debugfs_create_file("cycle", 0222, dent, ui, &debug_cycle_ops);
 	debugfs_create_file("release_wlocks", 0666, dent, ui,
 						&debug_wlocks_ops);
-	debugfs_create_file("prime_fail_countt", 0222, dent, ui,
+	debugfs_create_file("prime_fail_countt", 0666, dent, ui,
 						&prime_fail_ops);
 }
 #else
@@ -2395,7 +2484,11 @@ static ssize_t show_usb_chg_type(struct device *dev,
 	return count;
 }
 static DEVICE_ATTR(wakeup, S_IWUSR, 0, usb_remote_wakeup);
+#if defined(CONFIG_ANDROID_PANTECH_USB)
+static DEVICE_ATTR(usb_state, S_IRUSR | S_IRGRP | S_IROTH, show_usb_state, 0);
+#else
 static DEVICE_ATTR(usb_state, S_IRUSR, show_usb_state, 0);
+#endif
 static DEVICE_ATTR(usb_speed, S_IRUSR, show_usb_speed, 0);
 static DEVICE_ATTR(chg_type, S_IRUSR, show_usb_chg_type, 0);
 static DEVICE_ATTR(chg_current, S_IWUSR | S_IRUSR,

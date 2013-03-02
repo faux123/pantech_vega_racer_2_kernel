@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,14 +39,19 @@
 #include <mach/subsystem_restart.h>
 #include <mach/subsystem_notif.h>
 
+#include "timer.h"
+
 #define DRV_NAME	"msm_dsps"
-#define DRV_VERSION	"3.00"
+#define DRV_VERSION	"3.02"
 
 #define PPSS_PAUSE_REG	0x1804
 
 #define PPSS_TIMER0_32KHZ_REG	0x1004
 #define PPSS_TIMER0_20MHZ_REG	0x0804
 
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#define MODULE_NAME			"dsps_8960"
+#endif
 /**
  *  Driver Context
  *
@@ -103,7 +108,7 @@ static int dsps_load(const char *name)
 		pr_err("%s: fail to load DSPS firmware %s.\n", __func__, name);
 		return -ENODEV;
 	}
-
+	msleep(20);
 	return 0;
 }
 
@@ -146,9 +151,9 @@ static u32 dsps_read_slow_timer(void)
 {
 	u32 val;
 
-	val = readl_relaxed(drv->ppss_base + PPSS_TIMER0_32KHZ_REG);
-	rmb(); /* order reads from the user output buffer */
-
+	/* Read the timer value from the MSM sclk. The MSM slow clock & DSPS
+	 * timers are in sync, so these are the same value */
+	val = msm_timer_get_sclk_ticks();
 	pr_debug("%s.count=%d.\n", __func__, val);
 
 	return val;
@@ -655,11 +660,12 @@ static void dsps_fatal_handler(struct work_struct *work)
 	if (dsps_state & SMSM_RESET) {
 		pr_err("%s: DSPS fatal error detected. Resetting\n",
 		       __func__);
+		panic(MODULE_NAME "DSPS fatal error detected.");
 	} else {
 		pr_debug("%s: User-initiated DSPS reset. Resetting\n",
 			 __func__);
+		panic(MODULE_NAME "User-initiated DSPS reset.");
 	}
-	subsystem_restart("dsps");
 }
 
 
@@ -682,7 +688,7 @@ static void dsps_smsm_state_cb(void *data, uint32_t old_state,
 		pr_err
 		    ("%s: SMSM_RESET state detected. restarting the DSPS\n",
 		     __func__);
-		subsystem_restart("dsps");
+		panic(MODULE_NAME "DSPS : SMSM_RESET state detected.");
 	}
 }
 

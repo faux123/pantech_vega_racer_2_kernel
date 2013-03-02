@@ -1,6 +1,6 @@
 /* ehci-msm-hsic.c - HSUSB Host Controller Driver Implementation
  *
- * Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * Partly derived from ehci-fsl.c and ehci-hcd.c
  * Copyright (c) 2000-2004 by David Brownell
@@ -34,6 +34,8 @@
 #include <linux/gpio.h>
 #include <mach/clk.h>
 #include <mach/msm_iomap.h>
+#include <mach/msm_xo.h>
+#include <linux/spinlock.h>
 
 #define MSM_USB_BASE (hcd->regs)
 
@@ -41,14 +43,16 @@ struct msm_hsic_hcd {
 	struct ehci_hcd		ehci;
 	struct device		*dev;
 	struct clk		*ahb_clk;
-	struct clk		*sys_clk;
-	struct clk		*fs_xcvr_clk;
-	struct clk		*hsic_clk;
+	struct clk		*core_clk;
+	struct clk		*alt_core_clk;
+	struct clk		*phy_clk;
 	struct clk		*cal_clk;
 	struct regulator	*hsic_vddcx;
 	bool			async_int;
 	atomic_t                in_lpm;
+	struct msm_xo_voter	*xo_handle;
 	struct wake_lock	wlock;
+	int			peripheral_status_irq;
 };
 
 static inline struct msm_hsic_hcd *hcd_to_hsic(struct usb_hcd *hcd)
@@ -63,9 +67,10 @@ static inline struct usb_hcd *hsic_to_hcd(struct msm_hsic_hcd *mehci)
 
 #define ULPI_IO_TIMEOUT_USEC	(10 * 1000)
 
-#define USB_PHY_VDD_DIG_VOL_MIN	1000000 /* uV */
-#define USB_PHY_VDD_DIG_VOL_MAX	1320000 /* uV */
-#define USB_PHY_VDD_DIG_LOAD	49360	/* uA */
+#define USB_PHY_VDD_DIG_VOL_SUSP_MIN	500000 /* uV */
+#define USB_PHY_VDD_DIG_VOL_MIN		1000000 /* uV */
+#define USB_PHY_VDD_DIG_VOL_MAX		1320000 /* uV */
+#define USB_PHY_VDD_DIG_LOAD		49360	/* uA */
 
 static int msm_hsic_init_vddcx(struct msm_hsic_hcd *mehci, int init)
 {
@@ -145,18 +150,96 @@ static int ulpi_write(struct msm_hsic_hcd *mehci, u32 val, u32 reg)
 	return 0;
 }
 
+#define HSIC_HUB_VDD_VOL_MIN	1650000 /* uV */
+#define HSIC_HUB_VDD_VOL_MAX	1950000 /* uV */
+#define HSIC_HUB_VDD_LOAD	36000	/* uA */
+static int msm_hsic_config_hub(struct msm_hsic_hcd *mehci, int init)
+{
+	int ret = 0;
+	struct msm_hsic_host_platform_data *pdata;
+	static struct regulator *hsic_hub_reg;
+
+	pdata = mehci->dev->platform_data;
+	if (!pdata->hub_reset)
+		return ret;
+
+	if (!init)
+		goto disable_reg;
+
+	hsic_hub_reg = regulator_get(mehci->dev, "EXT_HUB_VDDIO");
+	if (IS_ERR(hsic_hub_reg)) {
+		dev_err(mehci->dev, "unable to get ext hub vddcx\n");
+		return PTR_ERR(hsic_hub_reg);
+	}
+
+	ret = gpio_request(pdata->hub_reset, "HSIC_HUB_RESET_GPIO");
+	if (ret < 0) {
+		dev_err(mehci->dev, "gpio request failed for GPIO%d\n",
+							pdata->hub_reset);
+		goto gpio_req_fail;
+	}
+
+	ret = regulator_set_voltage(hsic_hub_reg,
+			HSIC_HUB_VDD_VOL_MIN,
+			HSIC_HUB_VDD_VOL_MAX);
+	if (ret) {
+		dev_err(mehci->dev, "unable to set the voltage"
+				"for hsic hub reg\n");
+		goto reg_set_voltage_fail;
+	}
+
+	ret = regulator_set_optimum_mode(hsic_hub_reg,
+				HSIC_HUB_VDD_LOAD);
+	if (ret < 0) {
+		pr_err("%s: Unable to set optimum mode of the regulator:"
+					"VDDCX\n", __func__);
+		goto reg_optimum_mode_fail;
+	}
+
+	ret = regulator_enable(hsic_hub_reg);
+	if (ret) {
+		dev_err(mehci->dev, "unable to enable ext hub vddcx\n");
+		goto reg_enable_fail;
+	}
+
+	gpio_direction_output(pdata->hub_reset, 0);
+	/* Hub reset should be asserted for minimum 2usec before deasserting */
+	udelay(5);
+	gpio_direction_output(pdata->hub_reset, 1);
+
+	return 0;
+
+disable_reg:
+	regulator_disable(hsic_hub_reg);
+reg_enable_fail:
+	regulator_set_optimum_mode(hsic_hub_reg, 0);
+reg_optimum_mode_fail:
+	regulator_set_voltage(hsic_hub_reg, 0,
+				HSIC_HUB_VDD_VOL_MIN);
+reg_set_voltage_fail:
+	gpio_free(pdata->hub_reset);
+gpio_req_fail:
+	regulator_put(hsic_hub_reg);
+
+	return ret;
+
+}
+
 static int msm_hsic_config_gpios(struct msm_hsic_hcd *mehci, int gpio_en)
 {
 	int rc = 0;
 	struct msm_hsic_host_platform_data *pdata;
+	static int gpio_status;
 
 	pdata = mehci->dev->platform_data;
-	/*
-	 * In future versions, dedicated lines might be used for HSIC
-	 * strobe and data instead of gpios. Hence returning zero value.
-	 */
+
 	if (!pdata->strobe || !pdata->data)
 		return rc;
+
+	if (gpio_status == gpio_en)
+		return 0;
+
+	gpio_status = gpio_en;
 
 	if (!gpio_en)
 		goto free_gpio;
@@ -187,18 +270,18 @@ static int msm_hsic_phy_clk_reset(struct msm_hsic_hcd *mehci)
 {
 	int ret;
 
-	clk_enable(mehci->fs_xcvr_clk);
+	clk_enable(mehci->alt_core_clk);
 
-	ret = clk_reset(mehci->sys_clk, CLK_RESET_ASSERT);
+	ret = clk_reset(mehci->core_clk, CLK_RESET_ASSERT);
 	if (ret) {
-		clk_disable(mehci->fs_xcvr_clk);
+		clk_disable(mehci->alt_core_clk);
 		dev_err(mehci->dev, "usb phy clk assert failed\n");
 		return ret;
 	}
 	usleep_range(10000, 12000);
-	clk_disable(mehci->fs_xcvr_clk);
+	clk_disable(mehci->alt_core_clk);
 
-	ret = clk_reset(mehci->sys_clk, CLK_RESET_DEASSERT);
+	ret = clk_reset(mehci->core_clk, CLK_RESET_DEASSERT);
 	if (ret)
 		dev_err(mehci->dev, "usb phy clk deassert failed\n");
 
@@ -294,8 +377,9 @@ static int msm_hsic_reset(struct msm_hsic_hcd *mehci)
 static int msm_hsic_suspend(struct msm_hsic_hcd *mehci)
 {
 	struct usb_hcd *hcd = hsic_to_hcd(mehci);
-	int cnt = 0;
+	int cnt = 0, ret;
 	u32 val;
+	struct msm_hsic_host_platform_data *pdata;
 
 	if (atomic_read(&mehci->in_lpm)) {
 		dev_dbg(mehci->dev, "%s called in lpm\n", __func__);
@@ -321,8 +405,6 @@ static int msm_hsic_suspend(struct msm_hsic_hcd *mehci)
 		dev_err(mehci->dev, "Unable to suspend PHY\n");
 		msm_hsic_config_gpios(mehci, 0);
 		msm_hsic_reset(mehci);
-		enable_irq(hcd->irq);
-		return -ETIMEDOUT;
 	}
 
 	/*
@@ -341,10 +423,23 @@ static int msm_hsic_suspend(struct msm_hsic_hcd *mehci)
 	 */
 	mb();
 
-	clk_disable(mehci->sys_clk);
-	clk_disable(mehci->hsic_clk);
+	clk_disable(mehci->core_clk);
+	clk_disable(mehci->phy_clk);
 	clk_disable(mehci->cal_clk);
 	clk_disable(mehci->ahb_clk);
+	pdata = mehci->dev->platform_data;
+	if (pdata->hub_reset) {
+		ret = msm_xo_mode_vote(mehci->xo_handle, MSM_XO_MODE_OFF);
+		if (ret)
+			pr_err("%s failed to devote for"
+				"TCXO D1 buffer%d\n", __func__, ret);
+	}
+
+	ret = regulator_set_voltage(mehci->hsic_vddcx,
+				USB_PHY_VDD_DIG_VOL_SUSP_MIN,
+				USB_PHY_VDD_DIG_VOL_MAX);
+	if (ret < 0)
+		dev_err(mehci->dev, "unable to set vddcx voltage: min:0.5v max:1.3v\n");
 
 	atomic_set(&mehci->in_lpm, 1);
 	enable_irq(hcd->irq);
@@ -358,8 +453,9 @@ static int msm_hsic_suspend(struct msm_hsic_hcd *mehci)
 static int msm_hsic_resume(struct msm_hsic_hcd *mehci)
 {
 	struct usb_hcd *hcd = hsic_to_hcd(mehci);
-	int cnt = 0;
+	int cnt = 0, ret;
 	unsigned temp;
+	struct msm_hsic_host_platform_data *pdata;
 
 	if (!atomic_read(&mehci->in_lpm)) {
 		dev_dbg(mehci->dev, "%s called in !in_lpm\n", __func__);
@@ -368,8 +464,21 @@ static int msm_hsic_resume(struct msm_hsic_hcd *mehci)
 
 	wake_lock(&mehci->wlock);
 
-	clk_enable(mehci->sys_clk);
-	clk_enable(mehci->hsic_clk);
+	ret = regulator_set_voltage(mehci->hsic_vddcx,
+				USB_PHY_VDD_DIG_VOL_MIN,
+				USB_PHY_VDD_DIG_VOL_MAX);
+	if (ret < 0)
+		dev_err(mehci->dev, "unable to set vddcx voltage: min:1v max:1.3v\n");
+
+	pdata = mehci->dev->platform_data;
+	if (pdata->hub_reset) {
+		ret = msm_xo_mode_vote(mehci->xo_handle, MSM_XO_MODE_ON);
+		if (ret)
+			pr_err("%s failed to vote for"
+				"TCXO D1 buffer%d\n", __func__, ret);
+	}
+	clk_enable(mehci->core_clk);
+	clk_enable(mehci->phy_clk);
 	clk_enable(mehci->cal_clk);
 	clk_enable(mehci->ahb_clk);
 
@@ -525,79 +634,92 @@ static int msm_hsic_init_clocks(struct msm_hsic_hcd *mehci, u32 init)
 	if (!init)
 		goto put_clocks;
 
-	/*sys_clk is required for LINK protocol engine,it should be at 60MHz */
-	mehci->sys_clk = clk_get(mehci->dev, "usb_hsic_system_clk");
-	if (IS_ERR(mehci->sys_clk)) {
-		dev_err(mehci->dev, "failed to get hsic_sys_clk\n");
-		ret = PTR_ERR(mehci->sys_clk);
+	/*core_clk is required for LINK protocol engine,it should be at 60MHz */
+	mehci->core_clk = clk_get(mehci->dev, "core_clk");
+	if (IS_ERR(mehci->core_clk)) {
+		dev_err(mehci->dev, "failed to get core_clk\n");
+		ret = PTR_ERR(mehci->core_clk);
 		return ret;
 	}
-	clk_set_rate(mehci->sys_clk, 60000000);
+	clk_set_rate(mehci->core_clk, 60000000);
 
-	/* 60MHz fs_xcvr_clk is for LINK to be used during PHY RESET  */
-	mehci->fs_xcvr_clk = clk_get(mehci->dev, "usb_hsic_xcvr_fs_clk");
-	if (IS_ERR(mehci->fs_xcvr_clk)) {
-		dev_err(mehci->dev, "failed to get fs_xcvr_clk\n");
-		ret = PTR_ERR(mehci->fs_xcvr_clk);
-		goto put_sys_clk;
+	/* 60MHz alt_core_clk is for LINK to be used during PHY RESET  */
+	mehci->alt_core_clk = clk_get(mehci->dev, "alt_core_clk");
+	if (IS_ERR(mehci->alt_core_clk)) {
+		dev_err(mehci->dev, "failed to core_clk\n");
+		ret = PTR_ERR(mehci->alt_core_clk);
+		goto put_core_clk;
 	}
-	clk_set_rate(mehci->fs_xcvr_clk, 60000000);
+	clk_set_rate(mehci->alt_core_clk, 60000000);
 
-	/* 480MHz hsic_clk is required for HSIC PHY operation */
-	mehci->hsic_clk = clk_get(mehci->dev, "usb_hsic_hsic_clk");
-	if (IS_ERR(mehci->hsic_clk)) {
-		dev_err(mehci->dev, "failed to get hsic_clk\n");
-		ret = PTR_ERR(mehci->hsic_clk);
-		goto put_fs_xcvr_clk;
+	/* 480MHz phy_clk is required for HSIC PHY operation */
+	mehci->phy_clk = clk_get(mehci->dev, "phy_clk");
+	if (IS_ERR(mehci->phy_clk)) {
+		dev_err(mehci->dev, "failed to get phy_clk\n");
+		ret = PTR_ERR(mehci->phy_clk);
+		goto put_alt_core_clk;
 	}
-	clk_set_rate(mehci->hsic_clk, 480000000);
+	clk_set_rate(mehci->phy_clk, 480000000);
 
 	/* 10MHz cal_clk is required for calibration of I/O pads */
-	mehci->cal_clk = clk_get(mehci->dev, "usb_hsic_hsio_cal_clk");
+	mehci->cal_clk = clk_get(mehci->dev, "cal_clk");
 	if (IS_ERR(mehci->cal_clk)) {
-		dev_err(mehci->dev, "failed to get hsic_cal_clk\n");
+		dev_err(mehci->dev, "failed to get cal_clk\n");
 		ret = PTR_ERR(mehci->cal_clk);
-		goto put_hsic_clk;
+		goto put_phy_clk;
 	}
 	clk_set_rate(mehci->cal_clk, 10000000);
 
 	/* ahb_clk is required for data transfers */
-	mehci->ahb_clk = clk_get(mehci->dev, "usb_hsic_p_clk");
+	mehci->ahb_clk = clk_get(mehci->dev, "iface_clk");
 	if (IS_ERR(mehci->ahb_clk)) {
-		dev_err(mehci->dev, "failed to get hsic_ahb_clk\n");
+		dev_err(mehci->dev, "failed to get iface_clk\n");
 		ret = PTR_ERR(mehci->ahb_clk);
 		goto put_cal_clk;
 	}
 
-	clk_enable(mehci->sys_clk);
-	clk_enable(mehci->hsic_clk);
+	clk_enable(mehci->core_clk);
+	clk_enable(mehci->phy_clk);
 	clk_enable(mehci->cal_clk);
 	clk_enable(mehci->ahb_clk);
 
 	return 0;
 
 put_clocks:
-	clk_disable(mehci->sys_clk);
-	clk_disable(mehci->hsic_clk);
+	clk_disable(mehci->core_clk);
+	clk_disable(mehci->phy_clk);
 	clk_disable(mehci->cal_clk);
 	clk_disable(mehci->ahb_clk);
 	clk_put(mehci->ahb_clk);
 put_cal_clk:
 	clk_put(mehci->cal_clk);
-put_hsic_clk:
-	clk_put(mehci->hsic_clk);
-put_fs_xcvr_clk:
-	clk_put(mehci->fs_xcvr_clk);
-put_sys_clk:
-	clk_put(mehci->sys_clk);
+put_phy_clk:
+	clk_put(mehci->phy_clk);
+put_alt_core_clk:
+	clk_put(mehci->alt_core_clk);
+put_core_clk:
+	clk_put(mehci->core_clk);
 
 	return ret;
 }
+static irqreturn_t hsic_peripheral_status_change(int irq, void *dev_id)
+{
+	struct msm_hsic_hcd *mehci = dev_id;
+
+	pr_debug("%s: mechi:%p dev_id:%p\n", __func__, mehci, dev_id);
+
+	if (mehci)
+		msm_hsic_config_gpios(mehci, 0);
+
+	return IRQ_HANDLED;
+}
+
 static int __devinit ehci_hsic_msm_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
 	struct resource *res;
 	struct msm_hsic_hcd *mehci;
+	struct msm_hsic_host_platform_data *pdata;
 	int ret;
 
 	dev_dbg(&pdev->dev, "ehci_msm-hsic probe\n");
@@ -635,6 +757,12 @@ static int __devinit ehci_hsic_msm_probe(struct platform_device *pdev)
 	mehci = hcd_to_hsic(hcd);
 	mehci->dev = &pdev->dev;
 
+	res = platform_get_resource_byname(pdev,
+			IORESOURCE_IRQ,
+			"peripheral_status_irq");
+	if (res)
+		mehci->peripheral_status_irq = res->start;
+
 	ret = msm_hsic_init_clocks(mehci, 1);
 	if (ret) {
 		dev_err(&pdev->dev, "unable to initialize clocks\n");
@@ -649,10 +777,34 @@ static int __devinit ehci_hsic_msm_probe(struct platform_device *pdev)
 		goto deinit_clocks;
 	}
 
+	pdata = mehci->dev->platform_data;
+	if (pdata->hub_reset) {
+		mehci->xo_handle = msm_xo_get(MSM_XO_TCXO_D1, "hsic");
+		if (IS_ERR(mehci->xo_handle)) {
+			pr_err(" %s not able to get the handle"
+				"to vote for TCXO D1 buffer\n", __func__);
+			ret = PTR_ERR(mehci->xo_handle);
+			goto deinit_vddcx;
+		}
+
+		ret = msm_xo_mode_vote(mehci->xo_handle, MSM_XO_MODE_ON);
+		if (ret) {
+			pr_err("%s failed to vote for TCXO"
+				"D1 buffer%d\n", __func__, ret);
+			goto free_xo_handle;
+		}
+	}
+
+	ret = msm_hsic_config_hub(mehci, 1);
+	if (ret) {
+		dev_err(&pdev->dev, "unable to initialize hsic hub");
+		goto free_xo_handle;
+	}
+
 	ret = msm_hsic_reset(mehci);
 	if (ret) {
 		dev_err(&pdev->dev, "unable to initialize PHY\n");
-		goto deinit_vddcx;
+		goto deinit_hub;
 	}
 
 	ret = usb_add_hcd(hcd, hcd->irq, IRQF_SHARED);
@@ -664,6 +816,18 @@ static int __devinit ehci_hsic_msm_probe(struct platform_device *pdev)
 	device_init_wakeup(&pdev->dev, 1);
 	wake_lock_init(&mehci->wlock, WAKE_LOCK_SUSPEND, dev_name(&pdev->dev));
 	wake_lock(&mehci->wlock);
+
+	if (mehci->peripheral_status_irq) {
+		ret = request_threaded_irq(mehci->peripheral_status_irq,
+			NULL, hsic_peripheral_status_change,
+			IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING
+						| IRQF_SHARED,
+			"hsic_peripheral_status", mehci);
+		if (ret)
+			dev_err(&pdev->dev, "%s:request_irq:%d failed:%d",
+				__func__, mehci->peripheral_status_irq, ret);
+	}
+
 	/*
 	 * This pdev->dev is assigned parent of root-hub by USB core,
 	 * hence, runtime framework automatically calls this driver's
@@ -676,6 +840,11 @@ static int __devinit ehci_hsic_msm_probe(struct platform_device *pdev)
 
 unconfig_gpio:
 	msm_hsic_config_gpios(mehci, 0);
+deinit_hub:
+	msm_hsic_config_hub(mehci, 0);
+free_xo_handle:
+	if (pdata->hub_reset)
+		msm_xo_put(mehci->xo_handle);
 deinit_vddcx:
 	msm_hsic_init_vddcx(mehci, 0);
 deinit_clocks:
@@ -692,6 +861,10 @@ static int __devexit ehci_hsic_msm_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 	struct msm_hsic_hcd *mehci = hcd_to_hsic(hcd);
+	struct msm_hsic_host_platform_data *pdata;
+
+	if (mehci->peripheral_status_irq)
+		free_irq(mehci->peripheral_status_irq, mehci);
 
 	device_init_wakeup(&pdev->dev, 0);
 	pm_runtime_disable(&pdev->dev);
@@ -699,6 +872,10 @@ static int __devexit ehci_hsic_msm_remove(struct platform_device *pdev)
 
 	usb_remove_hcd(hcd);
 	msm_hsic_config_gpios(mehci, 0);
+	msm_hsic_config_hub(mehci, 0);
+	pdata = mehci->dev->platform_data;
+	if (pdata->hub_reset)
+		msm_xo_put(mehci->xo_handle);
 	msm_hsic_init_vddcx(mehci, 0);
 
 	msm_hsic_init_clocks(mehci, 0);

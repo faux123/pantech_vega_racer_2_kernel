@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -406,21 +406,6 @@ static int32_t ov2720_write_exp_gain(struct msm_sensor_ctrl_t *s_ctrl,
 	return 0;
 }
 
-static int ov2720_sensor_config(void __user *argp)
-{
-	return msm_sensor_config(&ov2720_s_ctrl, argp);
-}
-
-static int ov2720_sensor_open_init(const struct msm_camera_sensor_info *data)
-{
-	return msm_sensor_open_init(&ov2720_s_ctrl, data);
-}
-
-static int ov2720_sensor_release(void)
-{
-	return msm_sensor_release(&ov2720_s_ctrl);
-}
-
 static const struct i2c_device_id ov2720_i2c_id[] = {
 	{SENSOR_NAME, (kernel_ulong_t)&ov2720_s_ctrl},
 	{ }
@@ -438,31 +423,16 @@ static struct msm_camera_i2c_client ov2720_sensor_i2c_client = {
 	.addr_type = MSM_CAMERA_I2C_WORD_ADDR,
 };
 
-static int ov2720_sensor_v4l2_probe(const struct msm_camera_sensor_info *info,
-	struct v4l2_subdev *sdev, struct msm_sensor_ctrl *s)
-{
-	return msm_sensor_v4l2_probe(&ov2720_s_ctrl, info, sdev, s);
-}
-
-static int ov2720_probe(struct platform_device *pdev)
-{
-	return msm_sensor_register(pdev, ov2720_sensor_v4l2_probe);
-}
-
-struct platform_driver ov2720_driver = {
-	.probe = ov2720_probe,
-	.driver = {
-		.name = PLATFORM_DRIVER_NAME,
-		.owner = THIS_MODULE,
-	},
-};
-
 static int __init msm_sensor_init_module(void)
 {
-	return platform_driver_register(&ov2720_driver);
+	return i2c_add_driver(&ov2720_i2c_driver);
 }
 
-static struct v4l2_subdev_core_ops ov2720_subdev_core_ops;
+static struct v4l2_subdev_core_ops ov2720_subdev_core_ops = {
+	.ioctl = msm_sensor_subdev_ioctl,
+	.s_power = msm_sensor_power,
+};
+
 static struct v4l2_subdev_video_ops ov2720_subdev_video_ops = {
 	.enum_mbus_fmt = msm_sensor_v4l2_enum_fmt,
 };
@@ -477,12 +447,6 @@ static struct msm_sensor_fn_t ov2720_func_tbl = {
 	.sensor_stop_stream = msm_sensor_stop_stream,
 	.sensor_group_hold_on = msm_sensor_group_hold_on,
 	.sensor_group_hold_off = msm_sensor_group_hold_off,
-	.sensor_get_prev_lines_pf = msm_sensor_get_prev_lines_pf,
-	.sensor_get_prev_pixels_pl = msm_sensor_get_prev_pixels_pl,
-	.sensor_get_pict_lines_pf = msm_sensor_get_pict_lines_pf,
-	.sensor_get_pict_pixels_pl = msm_sensor_get_pict_pixels_pl,
-	.sensor_get_pict_max_exp_lc = msm_sensor_get_pict_max_exp_lc,
-	.sensor_get_pict_fps = msm_sensor_get_pict_fps,
 	.sensor_set_fps = msm_sensor_set_fps,
 	.sensor_write_exp_gain = ov2720_write_exp_gain,
 	.sensor_write_snapshot_exp_gain = ov2720_write_exp_gain,
@@ -490,12 +454,9 @@ static struct msm_sensor_fn_t ov2720_func_tbl = {
 	.sensor_set_sensor_mode = msm_sensor_set_sensor_mode,
 	.sensor_mode_init = msm_sensor_mode_init,
 	.sensor_get_output_info = msm_sensor_get_output_info,
-	.sensor_config = ov2720_sensor_config,
-	.sensor_open_init = ov2720_sensor_open_init,
-	.sensor_release = ov2720_sensor_release,
+	.sensor_config = msm_sensor_config,
 	.sensor_power_up = msm_sensor_power_up,
 	.sensor_power_down = msm_sensor_power_down,
-	.sensor_probe = msm_sensor_probe,
 };
 
 static struct msm_sensor_reg_t ov2720_regs = {
@@ -531,6 +492,7 @@ static struct msm_sensor_ctrl_t ov2720_s_ctrl = {
 	.sensor_v4l2_subdev_info_size = ARRAY_SIZE(ov2720_subdev_info),
 	.sensor_v4l2_subdev_ops = &ov2720_subdev_ops,
 	.func_tbl = &ov2720_func_tbl,
+	.clk_rate = MSM_SENSOR_MCLK_24HZ,
 };
 
 module_init(msm_sensor_init_module);

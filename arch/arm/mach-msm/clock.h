@@ -29,6 +29,9 @@
 #define CLKFLAG_NONEST			0x00000004
 #define CLKFLAG_NORESET			0x00000008
 #define CLKFLAG_HANDOFF_RATE		0x00000010
+#define CLKFLAG_HWCG			0x00000020
+#define CLKFLAG_RETAIN			0x00000040
+#define CLKFLAG_NORETAIN		0x00000080
 #define CLKFLAG_SKIP_AUTO_OFF		0x00000200
 #define CLKFLAG_MIN			0x00000400
 #define CLKFLAG_MAX			0x00000800
@@ -47,7 +50,7 @@ struct clk_vdd_class {
 	const char *class_name;
 	int (*set_vdd)(struct clk_vdd_class *v_class, int level);
 	int level_votes[MAX_VDD_LEVELS];
-	unsigned cur_level;
+	unsigned long cur_level;
 	spinlock_t lock;
 };
 
@@ -63,16 +66,18 @@ struct clk_ops {
 	int (*enable)(struct clk *clk);
 	void (*disable)(struct clk *clk);
 	void (*auto_off)(struct clk *clk);
+	void (*enable_hwcg)(struct clk *clk);
+	void (*disable_hwcg)(struct clk *clk);
+	int (*in_hwcg_mode)(struct clk *clk);
 	int (*handoff)(struct clk *clk);
 	int (*reset)(struct clk *clk, enum clk_reset_action action);
-	int (*set_rate)(struct clk *clk, unsigned rate);
-	int (*set_min_rate)(struct clk *clk, unsigned rate);
-	int (*set_max_rate)(struct clk *clk, unsigned rate);
+	int (*set_rate)(struct clk *clk, unsigned long rate);
+	int (*set_max_rate)(struct clk *clk, unsigned long rate);
 	int (*set_flags)(struct clk *clk, unsigned flags);
-	unsigned (*get_rate)(struct clk *clk);
+	unsigned long (*get_rate)(struct clk *clk);
 	int (*list_rate)(struct clk *clk, unsigned n);
 	int (*is_enabled)(struct clk *clk);
-	long (*round_rate)(struct clk *clk, unsigned rate);
+	long (*round_rate)(struct clk *clk, unsigned long rate);
 	int (*set_parent)(struct clk *clk, struct clk *parent);
 	struct clk *(*get_parent)(struct clk *clk);
 	bool (*is_local)(struct clk *clk);
@@ -93,9 +98,13 @@ struct clk {
 	struct clk *depends;
 	struct clk_vdd_class *vdd_class;
 	unsigned long fmax[MAX_VDD_LEVELS];
+	unsigned long rate;
 
 	struct list_head children;
 	struct list_head siblings;
+#ifdef CONFIG_CLOCK_MAP
+	unsigned id;
+#endif
 
 	unsigned count;
 	spinlock_t lock;

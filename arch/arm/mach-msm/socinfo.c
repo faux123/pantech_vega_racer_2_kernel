@@ -22,6 +22,14 @@
 
 #include "smd_private.h"
 
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#include "sky_sys_reset.h"
+
+
+
+
+#endif
+
 #define BUILD_ID_LENGTH 32
 
 enum {
@@ -31,6 +39,8 @@ enum {
 	HW_PLATFORM_FLUID   = 3,
 	HW_PLATFORM_SVLTE_FFA	= 4,
 	HW_PLATFORM_SVLTE_SURF	= 5,
+	HW_PLATFORM_MTP  = 8,
+	HW_PLATFORM_LIQUID  = 9,
 	/* Dragonboard platform id is assigned as 10 in CDT */
 	HW_PLATFORM_DRAGON	= 10,
 	HW_PLATFORM_INVALID
@@ -43,6 +53,8 @@ const char *hw_platform[] = {
 	[HW_PLATFORM_FLUID] = "Fluid",
 	[HW_PLATFORM_SVLTE_FFA] = "SVLTE_FFA",
 	[HW_PLATFORM_SVLTE_SURF] = "SLVTE_SURF",
+	[HW_PLATFORM_MTP] = "MTP",
+	[HW_PLATFORM_LIQUID] = "Liquid",
 	[HW_PLATFORM_DRAGON] = "Dragon"
 };
 
@@ -209,12 +221,33 @@ static enum msm_cpu cpu_of_id[] = {
 	/* 9x15 ID */
 	[104] = MSM_CPU_9615,
 	[105] = MSM_CPU_9615,
+	[106] = MSM_CPU_9615,
+	[107] = MSM_CPU_9615,
 
 	/* 8064 IDs */
 	[109] = MSM_CPU_8064,
 
 	/* 8930 IDs */
 	[116] = MSM_CPU_8930,
+	[117] = MSM_CPU_8930,
+	[118] = MSM_CPU_8930,
+	[119] = MSM_CPU_8930,
+
+	/* 8627 IDs */
+	[120] = MSM_CPU_8627,
+	[121] = MSM_CPU_8627,
+
+	/* 8660A ID */
+	[122] = MSM_CPU_8960,
+
+	/* 8260A ID */
+	[123] = MSM_CPU_8960,
+
+	/* 8060A ID */
+	[124] = MSM_CPU_8960,
+
+	/* Copper IDs */
+	[126] = MSM_CPU_COPPER,
 
 	/* Uninitialized IDs are not known to run Linux.
 	   MSM_CPU_UNKNOWN is set to 0 to ensure these IDs are
@@ -575,18 +608,41 @@ arch_initcall(socinfo_init_sysdev);
 
 void *setup_dummy_socinfo(void)
 {
+#if (1)  // 20111103 jylee
+	if (machine_is_msm8960_svlte() || machine_is_msm8960_cheetah() ||
+	    machine_is_msm8960_starq() || machine_is_msm8960_racerj() ||
+	    machine_is_msm8960_ef46l() || machine_is_msm8960_csfb() ||
+	    machine_is_msm8960_zepplin() || machine_is_msm8960_ef45k() ||
+	    machine_is_msm8960_ef47s() || machine_is_msm8960_vegapvw() ||
+	    machine_is_msm8960_vegapkddi() || machine_is_msm8960_rumi3() || 
+	    machine_is_msm8960_sim() || machine_is_msm8960_cdp())
+#else
 	if (machine_is_msm8960_rumi3() || machine_is_msm8960_sim() ||
 	    machine_is_msm8960_cdp())
+#endif		
 		dummy_socinfo.id = 87;
 	else if (machine_is_apq8064_rumi3() || machine_is_apq8064_sim())
 		dummy_socinfo.id = 109;
 	else if (machine_is_msm9615_mtp() || machine_is_msm9615_cdp())
 		dummy_socinfo.id = 104;
+	else if (early_machine_is_copper())
+		dummy_socinfo.id = 126;
 	return (void *) &dummy_socinfo;
 }
 
 int __init socinfo_init(void)
 {
+#if defined(CONFIG_PANTECH_PMIC)
+    oem_pm_smem_vendor1_data_type *smem_vendor1_data;
+    smem_vendor1_data = smem_alloc(SMEM_ID_VENDOR1, sizeof(oem_pm_smem_vendor1_data_type));
+
+    //chjeon20111027@LS1 add for silent boot mode
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+    sky_sys_rst_set_silent_boot_info();
+#endif
+#endif
+
+	
 	socinfo = smem_alloc(SMEM_HW_SW_BUILD_ID, sizeof(struct socinfo_v6));
 
 	if (!socinfo)
@@ -683,6 +739,17 @@ int __init socinfo_init(void)
 		pr_err("%s: Unknown format found\n", __func__);
 		break;
 	}
+
+  #if defined(CONFIG_PANTECH_PMIC)
+  pr_info("smem_vendor1_data->power_on_reason : 0x%x\n", smem_vendor1_data->power_on_reason);
+  pr_info("smem_vendor1_data->factory_cable_adc : %d\n", smem_vendor1_data->factory_cable_adc);
+  pr_info("smem_vendor1_data->battery_id_adc : %d\n", smem_vendor1_data->battery_id_adc);
+  pr_info("smem_vendor1_data->hw_rev_adc : %d\n", smem_vendor1_data->hw_rev_adc);
+  pr_info("smem_vendor1_data->power_on_mode : %d\n", smem_vendor1_data->power_on_mode);
+  pr_info("smem_vendor1_data->silent_boot_mode : %d\n", smem_vendor1_data->silent_boot_mode);
+  pr_info("smem_vendor1_data->hw_rev : %d\n", smem_vendor1_data->hw_rev);
+  pr_info("smem_vendor1_data->battery_id : %d\n", smem_vendor1_data->battery_id);
+  #endif
 
 	return 0;
 }

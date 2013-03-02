@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,7 +13,8 @@
 #ifndef _VCD_CORE_H_
 #define _VCD_CORE_H_
 
-#include "vcd_api.h"
+#include <linux/ion.h>
+#include <media/msm/vcd_api.h>
 #include "vcd_ddl_api.h"
 
 #include "vcd_util.h"
@@ -204,8 +205,11 @@ struct vcd_clnt_ctxt {
 	struct vcd_sequence_hdr seq_hdr;
 	u8 *seq_hdr_phy_addr;
 	struct vcd_clnt_status status;
-
+	struct ion_client *vcd_ion_client;
+	u32 vcd_enable_ion;
 	struct vcd_clnt_ctxt *next;
+	u32 meta_mode;
+	int secure;
 };
 
 #define VCD_BUFFERPOOL_INUSE_DECREMENT(val) \

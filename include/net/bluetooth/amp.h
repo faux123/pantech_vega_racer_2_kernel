@@ -45,9 +45,6 @@ struct a2mp_cmd_rej {
 	__le16     reason;
 } __packed;
 
-#define HCI_A2MP_ID(id)     ((id)+0x10)  /* convert HCI dev index to AMP ID */
-#define A2MP_HCI_ID(id)     ((id)-0x10)  /* convert AMP ID to HCI dev index */
-
 struct a2mp_discover_req {
 	__le16     mtu;
 	__le16     ext_feat;
@@ -118,7 +115,10 @@ int amp_init(void);
 void amp_exit(void);
 
 /* L2CAP-AMP fixed channel interface */
-void amp_conn_ind(struct l2cap_conn *conn, struct sk_buff *skb);
+//20120331 lhw_device [PATCH] Bluetooth: Hold ref on hci_conn when setting up A2MP fixed channel +++
+//void amp_conn_ind(struct l2cap_conn *conn, struct sk_buff *skb);
+void amp_conn_ind(struct hci_conn *hcon, struct sk_buff *skb);
+//20120331 lhw_device [PATCH] Bluetooth: Hold ref on hci_conn when setting up A2MP fixed channel ---
 
 /* L2CAP-AMP link interface */
 void amp_create_physical(struct l2cap_conn *conn, struct sock *sk);
@@ -259,7 +259,10 @@ struct amp_work_state_change {
 };
 struct amp_work_conn_ind {
 	struct work_struct work;
-	struct l2cap_conn *conn;
+	//20120331 lhw_device [PATCH] Bluetooth: Hold ref on hci_conn when setting up A2MP fixed channel +++
+	//struct l2cap_conn *conn;
+	struct hci_conn *hcon;
+	//20120331 lhw_device [PATCH] Bluetooth: Hold ref on hci_conn when setting up A2MP fixed channel ---
 	struct sk_buff *skb;
 };
 struct amp_work_create_physical {

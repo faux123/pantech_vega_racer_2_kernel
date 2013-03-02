@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -61,13 +61,17 @@ static struct platform_driver mipi_dsi_driver = {
 };
 
 struct device dsi_dev;
-
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+extern int gpio43;
+#endif
 static int mipi_dsi_off(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct msm_fb_data_type *mfd;
 	struct msm_panel_info *pinfo;
-
+#if defined(CONFIG_MACH_MSM8960_CHEETAH) || defined(CONFIG_MACH_MSM8960_STARQ) ||defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI)
+	struct mipi_panel_info *mipi;
+#endif
 	mfd = platform_get_drvdata(pdev);
 	pinfo = &mfd->panel_info;
 
@@ -91,12 +95,21 @@ static int mipi_dsi_off(struct platform_device *pdev)
 		} else {
 			mdp3_dsi_cmd_dma_busy_wait(mfd);
 		}
+	} else {
+		/* video mode, wait until fifo cleaned */
+#ifdef CONFIG_MACH_MSM8960_STARQ
+		mipi_dsi_controller_cfg(0);
+#endif
 	}
 
 	/*
 	 * Desctiption: change to DSI_CMD_MODE since it needed to
 	 * tx DCS dsiplay off comamnd to panel
 	 */
+#if defined (CONFIG_MACH_MSM8960_EF45K) ||defined (CONFIG_MACH_MSM8960_EF47S) || (defined(CONFIG_MACH_MSM8960_EF46L) &&(BOARD_VER >=TP15))
+       ret = panel_next_off(pdev);
+	   mipi_dsi_controller_cfg(0);
+#else
 	mipi_dsi_op_mode_config(DSI_CMD_MODE);
 
 	if (mfd->panel_info.type == MIPI_CMD_PANEL) {
@@ -108,11 +121,27 @@ static int mipi_dsi_off(struct platform_device *pdev)
 			mipi_dsi_set_tear_off(mfd);
 		}
 	}
-
 	ret = panel_next_off(pdev);
+#endif
 
 #ifdef CONFIG_MSM_BUS_SCALING
 	mdp_bus_scale_update_request(0);
+#endif
+
+#if defined(CONFIG_MACH_MSM8960_CHEETAH) || defined(CONFIG_MACH_MSM8960_STARQ) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI)
+	mipi  = &mfd->panel_info.mipi;
+
+	if (mipi->force_clk_lane_hs) {
+		u32 tmp;
+
+		tmp = MIPI_INP(MIPI_DSI_BASE + 0xA8);
+		tmp &= ~(1<<28);
+		MIPI_OUTP(MIPI_DSI_BASE + 0xA8, tmp);
+		wmb();
+#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode
+		printk("[MIPI: shinbrad Low speed Clk Set(Off Sequence) .................................................]\n");
+#endif
+	}
 #endif
 
 	local_bh_disable();
@@ -129,15 +158,21 @@ static int mipi_dsi_off(struct platform_device *pdev)
 	mipi_dsi_ahb_ctrl(0);
 	local_bh_enable();
 
-	if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
+	if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save){
+#ifdef CONFIG_MACH_MSM8960_OSCAR	
+		gpio_direction_output(gpio43, 0);
+		mdelay(110);
+#endif
 		mipi_dsi_pdata->dsi_power_save(0);
 
+	}
 	if (mdp_rev >= MDP_REV_41)
 		mutex_unlock(&mfd->dma->ov_mutex);
 	else
 		up(&mfd->dma->mutex);
 
-	pr_debug("%s:\n", __func__);
+
+	pr_debug("%s-:\n", __func__);
 
 	return ret;
 }
@@ -164,17 +199,13 @@ static int mipi_dsi_on(struct platform_device *pdev)
 	if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
 		mipi_dsi_pdata->dsi_power_save(1);
 
+	cont_splash_clk_ctrl();
 	local_bh_disable();
 	mipi_dsi_ahb_ctrl(1);
 	local_bh_enable();
 
 	clk_rate = mfd->fbi->var.pixclock;
 	clk_rate = min(clk_rate, mfd->panel_info.clk_max);
-
-
-#ifndef CONFIG_FB_MSM_MDP303
-	mdp4_overlay_dsi_state_set(ST_DSI_RESUME);
-#endif
 
 	MIPI_OUTP(MIPI_DSI_BASE + 0x114, 1);
 	MIPI_OUTP(MIPI_DSI_BASE + 0x114, 0);
@@ -256,7 +287,7 @@ static int mipi_dsi_on(struct platform_device *pdev)
 	}
 
 	mipi_dsi_host_init(mipi);
-
+#if 0
 	if (mipi->force_clk_lane_hs) {
 		u32 tmp;
 
@@ -265,10 +296,39 @@ static int mipi_dsi_on(struct platform_device *pdev)
 		MIPI_OUTP(MIPI_DSI_BASE + 0xA8, tmp);
 		wmb();
 	}
+#endif
 
+	if (mdp_rev >= MDP_REV_41)
+		mutex_lock(&mfd->dma->ov_mutex);
+	else
+		down(&mfd->dma->mutex);
+
+#ifdef CONFIG_F_SKYDISP_SILENT_BOOT
+		if(!backlight_value)
+#endif
+#if 0//defined (CONFIG_MACH_MSM8960_EF45K) ||defined (CONFIG_MACH_MSM8960_EF47S) || (defined(CONFIG_MACH_MSM8960_EF46L) &&(BOARD_VER >=TP15))
+	mipi_dsi_op_mode_config(mipi->mode);
+
+      msleep(35);
+	ret = panel_next_on(pdev);
+#else
 	ret = panel_next_on(pdev);
 
 	mipi_dsi_op_mode_config(mipi->mode);
+#endif
+#if defined(CONFIG_MACH_MSM8960_CHEETAH) || defined(CONFIG_MACH_MSM8960_STARQ) || defined(CONFIG_MACH_MSM8960_VEGAPVW) || defined(CONFIG_MACH_MSM8960_VEGAPKDDI)
+	if (mipi->force_clk_lane_hs) {
+		u32 tmp;
+
+		tmp = MIPI_INP(MIPI_DSI_BASE + 0xA8);
+		tmp |= (1<<28);
+		MIPI_OUTP(MIPI_DSI_BASE + 0xA8, tmp);
+		wmb();
+#if !defined(FEATURE_AARM_RELEASE_MODE) //not user mode
+		printk("[MIPI: shinbrad High speed Clk Set .................................................]\n");
+#endif
+	}
+#endif
 
 	if (mfd->panel_info.type == MIPI_CMD_PANEL) {
 		if (pinfo->lcd.vsync_enable) {
@@ -320,6 +380,16 @@ static int mipi_dsi_on(struct platform_device *pdev)
 #ifdef CONFIG_MSM_BUS_SCALING
 	mdp_bus_scale_update_request(2);
 #endif
+
+	mdp4_overlay_dsi_state_set(ST_DSI_RESUME);
+
+	if (mdp_rev >= MDP_REV_41)
+		mutex_unlock(&mfd->dma->ov_mutex);
+	else
+		up(&mfd->dma->mutex);
+
+	pr_debug("%s-:\n", __func__);
+
 	return ret;
 }
 
@@ -417,7 +487,7 @@ static int mipi_dsi_probe(struct platform_device *pdev)
 		return 0;
 	}
 
-	mipi_dsi_clk_init(&pdev->dev);
+	mipi_dsi_clk_init(pdev);
 
 	if (!mipi_dsi_resource_initialized)
 		return -EPERM;

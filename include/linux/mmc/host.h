@@ -12,6 +12,7 @@
 
 #include <linux/leds.h>
 #include <linux/sched.h>
+#include <linux/wakelock.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
@@ -218,10 +219,12 @@ struct mmc_host {
 	int			clk_requests;	/* internal reference counter */
 	unsigned int		clk_delay;	/* number of MCI clk hold cycles */
 	bool			clk_gated;	/* clock gated */
-	struct work_struct	clk_gate_work; /* delayed clock gate */
+	struct delayed_work	clk_gate_work; /* delayed clock gate */
 	unsigned int		clk_old;	/* old clock value cache */
 	spinlock_t		clk_lock;	/* lock for clk fields */
 	struct mutex		clk_gate_mutex;	/* mutex for clock gating */
+	struct device_attribute clkgate_delay_attr;
+	unsigned long		clkgate_delay;
 #endif
 
 	/* host specific block data */
@@ -262,6 +265,8 @@ struct mmc_host {
 	int			claim_cnt;	/* "claim" nesting count */
 
 	struct delayed_work	detect;
+	struct wake_lock	detect_wake_lock;
+	int                     detect_change;  /* card detect flag */
 
 	const struct mmc_bus_ops *bus_ops;	/* current bus driver */
 	unsigned int		bus_refs;	/* reference counter */
@@ -308,6 +313,7 @@ struct mmc_host {
 		ktime_t wtime_drv;	   /* Wr time  MMC Host  */
 		ktime_t start;
 	} perf;
+//	bool perf_enable;
 #endif
 	unsigned long		private[0] ____cacheline_aligned;
 };
@@ -426,5 +432,25 @@ static inline int mmc_host_cmd23(struct mmc_host *host)
 {
 	return host->caps & MMC_CAP_CMD23;
 }
+
+#ifdef CONFIG_MMC_CLKGATE
+void mmc_host_clk_hold(struct mmc_host *host);
+void mmc_host_clk_release(struct mmc_host *host);
+unsigned int mmc_host_clk_rate(struct mmc_host *host);
+
+#else
+static inline void mmc_host_clk_hold(struct mmc_host *host)
+{
+}
+
+static inline void mmc_host_clk_release(struct mmc_host *host)
+{
+}
+
+static inline unsigned int mmc_host_clk_rate(struct mmc_host *host)
+{
+	return host->ios.clock;
+}
+#endif
 #endif
 

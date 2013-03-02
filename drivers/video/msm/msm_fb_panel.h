@@ -37,6 +37,7 @@ typedef struct panel_id_s {
 #define DTV_PANEL		7	/* DTV */
 #define MIPI_VIDEO_PANEL	8	/* MIPI */
 #define MIPI_CMD_PANEL		9	/* MIPI */
+#define WRITEBACK_PANEL		10	/* Wifi display */
 
 /* panel class */
 typedef enum {
@@ -50,6 +51,7 @@ typedef enum {
 typedef enum {
 	DISPLAY_1 = 0,		/* attached as first device */
 	DISPLAY_2,		/* attached on second device */
+	DISPLAY_3,              /* attached on third writeback device */
 	MAX_PHYS_TARGET_NUM,
 } DISP_TARGET_PHYS;
 
@@ -122,7 +124,7 @@ struct mipi_panel_info {
 	char dma_trigger;
 	uint32 dsi_pclk_rate;
 	/* The packet-size should not bet changed */
-	char fixed_packet_size;
+	char no_max_pkt_size;
 	/* Clock required during LP commands */
 	char force_clk_lane_hs;
 	/* Pad width */
@@ -174,6 +176,7 @@ struct msm_fb_panel_data {
 	/* function entry chain */
 	int (*on) (struct platform_device *pdev);
 	int (*off) (struct platform_device *pdev);
+	int (*power_ctrl) (boolean enable);
 	struct platform_device *next;
 	int (*clk_func) (int enable);
 };

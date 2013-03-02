@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,6 +15,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/msm_kgsl.h>
 #include <linux/regulator/machine.h>
+#include <linux/init.h>
 #include <mach/irqs.h>
 #include <mach/msm_iomap.h>
 #include <mach/board.h>
@@ -522,6 +523,73 @@ int __init msm_add_sdcc(unsigned int controller, struct mmc_platform_data *plat)
 	return platform_device_register(pdev);
 }
 
+#ifdef CONFIG_MSM_CAMERA_V4L2
+static struct resource msm_csic0_resources[] = {
+	{
+		.name   = "csic",
+		.start  = 0xA0F00000,
+		.end    = 0xA0F00000 + 0x00100000 - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+	{
+		.name   = "csic",
+		.start  = INT_CSI_IRQ_0,
+		.end    = INT_CSI_IRQ_0,
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+static struct resource msm_csic1_resources[] = {
+	{
+		.name   = "csic",
+		.start  = 0xA1000000,
+		.end    = 0xA1000000 + 0x00100000 - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+	{
+		.name   = "csic",
+		.start  = INT_CSI_IRQ_1,
+		.end    = INT_CSI_IRQ_1,
+		.flags  = IORESOURCE_IRQ,
+	},
+};
+
+struct platform_device msm7x27a_device_csic0 = {
+	.name           = "msm_csic",
+	.id             = 0,
+	.resource       = msm_csic0_resources,
+	.num_resources  = ARRAY_SIZE(msm_csic0_resources),
+};
+
+struct platform_device msm7x27a_device_csic1 = {
+	.name           = "msm_csic",
+	.id             = 1,
+	.resource       = msm_csic1_resources,
+	.num_resources  = ARRAY_SIZE(msm_csic1_resources),
+};
+
+static struct resource msm_clkctl_resources[] = {
+	{
+		.name   = "clk_ctl",
+		.start  = MSM_CLK_CTL_PHYS,
+		.end    = MSM_CLK_CTL_PHYS + MSM_CLK_CTL_SIZE - 1,
+		.flags  = IORESOURCE_MEM,
+	},
+};
+struct platform_device msm7x27a_device_clkctl = {
+	.name           = "msm_clk_ctl",
+	.id             = 0,
+	.resource       = msm_clkctl_resources,
+	.num_resources  = ARRAY_SIZE(msm_clkctl_resources),
+};
+
+struct platform_device msm7x27a_device_vfe = {
+	.name           = "msm_vfe",
+	.id             = 0,
+};
+
+#endif
+
 #define MDP_BASE		0xAA200000
 #define MIPI_DSI_HW_BASE	0xA1100000
 
@@ -588,34 +656,26 @@ static struct resource kgsl_3d0_resources[] = {
 };
 
 static struct kgsl_device_platform_data kgsl_3d0_pdata = {
-	.pwr_data = {
-		.pwrlevel = {
-			{
-				.gpu_freq = 245760000,
-				.bus_freq = 200000000,
-			},
-			{
-				.gpu_freq = 133330000,
-				.bus_freq = 0,
-			},
+	.pwrlevel = {
+		{
+			.gpu_freq = 245760000,
+			.bus_freq = 200000000,
 		},
-		.init_level = 0,
-		.num_levels = 2,
-		.set_grp_async = set_grp_xbar_async,
-		.idle_timeout = HZ/5,
-		.nap_allowed = false,
-	},
-	.clk = {
-		.name = {
-			.clk = "core_clk",
-			.pclk = "iface_clk",
+		{
+			.gpu_freq = 192000000,
+			.bus_freq = 160000000,
+		},
+		{
+			.gpu_freq = 133330000,
+			.bus_freq = 0,
 		},
 	},
-	.imem_clk_name = {
-		.clk = "mem_clk",
-		.pclk = NULL,
-	},
-
+	.init_level = 0,
+	.num_levels = 3,
+	.set_grp_async = set_grp_xbar_async,
+	.idle_timeout = HZ/5,
+	.nap_allowed = false,
+	.clk_map = KGSL_CLK_CORE | KGSL_CLK_IFACE | KGSL_CLK_MEM,
 };
 
 struct platform_device msm_kgsl_3d0 = {
@@ -631,10 +691,11 @@ struct platform_device msm_kgsl_3d0 = {
 void __init msm7x25a_kgsl_3d0_init(void)
 {
 	if (cpu_is_msm7x25a() || cpu_is_msm7x25aa()) {
-		kgsl_3d0_pdata.pwr_data.pwrlevel[0].gpu_freq = 133330000;
-		kgsl_3d0_pdata.pwr_data.pwrlevel[0].bus_freq = 160000000;
-		kgsl_3d0_pdata.pwr_data.pwrlevel[1].gpu_freq = 96000000;
-		kgsl_3d0_pdata.pwr_data.pwrlevel[1].bus_freq = 0;
+		kgsl_3d0_pdata.num_levels = 2;
+		kgsl_3d0_pdata.pwrlevel[0].gpu_freq = 133330000;
+		kgsl_3d0_pdata.pwrlevel[0].bus_freq = 160000000;
+		kgsl_3d0_pdata.pwrlevel[1].gpu_freq = 96000000;
+		kgsl_3d0_pdata.pwrlevel[1].bus_freq = 0;
 	}
 }
 
@@ -706,6 +767,31 @@ struct platform_device asoc_msm_dai1 = {
 	.name   = "msm-cpu-dai",
 	.id     = 0,
 };
+
+static struct resource gpio_resources[] = {
+	{
+		.start	= INT_GPIO_GROUP1,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= INT_GPIO_GROUP2,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device msm_device_gpio = {
+	.name		= "msmgpio",
+	.id		= -1,
+	.resource	= gpio_resources,
+	.num_resources	= ARRAY_SIZE(gpio_resources),
+};
+
+static int msm7627a_init_gpio(void)
+{
+	platform_device_register(&msm_device_gpio);
+	return 0;
+}
+postcore_initcall(msm7627a_init_gpio);
 
 int __init msm7x2x_misc_init(void)
 {

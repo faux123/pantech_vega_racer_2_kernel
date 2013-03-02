@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,6 +39,11 @@ struct snd_msm {
 	struct snd_pcm *pcm;
 };
 
+#define PLAYBACK_NUM_PERIODS	8
+#define PLAYBACK_PERIOD_SIZE	2048
+#define CAPTURE_NUM_PERIODS	16
+#define CAPTURE_PERIOD_SIZE	320
+
 static struct snd_pcm_hardware msm_pcm_hardware_capture = {
 	.info =                 (SNDRV_PCM_INFO_MMAP |
 				SNDRV_PCM_INFO_BLOCK_TRANSFER |
@@ -51,11 +56,11 @@ static struct snd_pcm_hardware msm_pcm_hardware_capture = {
 	.rate_max =             48000,
 	.channels_min =         1,
 	.channels_max =         2,
-	.buffer_bytes_max =     512 * 8,
-	.period_bytes_min =	512,
-	.period_bytes_max =     512,
-	.periods_min =          8,
-	.periods_max =          8,
+	.buffer_bytes_max =     CAPTURE_NUM_PERIODS * CAPTURE_PERIOD_SIZE,
+	.period_bytes_min =	CAPTURE_PERIOD_SIZE,
+	.period_bytes_max =     CAPTURE_PERIOD_SIZE,
+	.periods_min =          CAPTURE_NUM_PERIODS,
+	.periods_max =          CAPTURE_NUM_PERIODS,
 	.fifo_size =            0,
 };
 
@@ -71,11 +76,11 @@ static struct snd_pcm_hardware msm_pcm_hardware_playback = {
 	.rate_max =             48000,
 	.channels_min =         1,
 	.channels_max =         2,
-	.buffer_bytes_max =     2048 * 8,
-	.period_bytes_min =	2048,
-	.period_bytes_max =     2048,
-	.periods_min =          8,
-	.periods_max =          8,
+	.buffer_bytes_max =     PLAYBACK_NUM_PERIODS * PLAYBACK_PERIOD_SIZE,
+	.period_bytes_min =	PLAYBACK_PERIOD_SIZE,
+	.period_bytes_max =     PLAYBACK_PERIOD_SIZE,
+	.periods_min =          PLAYBACK_NUM_PERIODS,
+	.periods_max =          PLAYBACK_NUM_PERIODS,
 	.fifo_size =            0,
 };
 
@@ -84,7 +89,7 @@ static unsigned int supported_sample_rates[] = {
 	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000
 };
 
-static uint32_t in_frame_info[8][2];
+static uint32_t in_frame_info[CAPTURE_NUM_PERIODS][2];
 
 static struct snd_pcm_hw_constraint_list constraints_sample_rates = {
 	.count = ARRAY_SIZE(supported_sample_rates),
@@ -335,7 +340,7 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 		}
 	}
 
-	pr_info("%s: session ID %d\n", __func__, prtd->audio_client->session);
+	pr_debug("%s: session ID %d\n", __func__, prtd->audio_client->session);
 
 	prtd->session_id = prtd->audio_client->session;
 	msm_pcm_routing_reg_phy_stream(soc_prtd->dai_link->be_id,
@@ -588,16 +593,25 @@ static snd_pcm_uframes_t msm_pcm_pointer(struct snd_pcm_substream *substream)
 static int msm_pcm_mmap(struct snd_pcm_substream *substream,
 				struct vm_area_struct *vma)
 {
+	int result = 0;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct msm_audio *prtd = runtime->private_data;
 
 	pr_debug("%s\n", __func__);
 	prtd->mmap_flag = 1;
-	dma_mmap_coherent(substream->pcm->card->dev, vma,
-				     runtime->dma_area,
-				     runtime->dma_addr,
-				     runtime->dma_bytes);
-	return 0;
+
+	if (runtime->dma_addr && runtime->dma_bytes) {
+		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+		result = remap_pfn_range(vma, vma->vm_start,
+				runtime->dma_addr >> PAGE_SHIFT,
+				runtime->dma_bytes,
+				vma->vm_page_prot);
+	} else {
+		pr_err("Physical address or size of buf is NULL");
+		return -EINVAL;
+	}
+
+	return result;
 }
 
 static int msm_pcm_hw_params(struct snd_pcm_substream *substream,

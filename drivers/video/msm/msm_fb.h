@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -35,13 +35,32 @@
 #include <linux/hrtimer.h>
 
 #include <linux/fb.h>
+#include <linux/list.h>
+#include <linux/types.h>
 
+#include <linux/msm_mdp.h>
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
 #endif
 
 #include "msm_fb_panel.h"
 #include "mdp.h"
+
+
+#define CONFIG_F_SKYDISP_SILENT_BOOT //silent boot p13832@shji 		
+#define CONFIG_LCD_DRIVER_STABILITY
+#ifdef CONFIG_F_SKYDISP_SILENT_BOOT
+extern int backlight_value;
+#endif
+#ifdef CONFIG_MACH_MSM8960_OSCAR
+#define CONFIG_ACL_FOR_AMOLED
+#define CONFIG_ACL_FOR_RECOVERY
+#endif
+#if defined(CONFIG_MACH_MSM8960_EF45K) || defined(CONFIG_MACH_MSM8960_EF46L) ||\
+	defined (CONFIG_MACH_MSM8960_EF47S)
+#define CONFIG_LCD_CABC_CONTROL
+extern int charger_flag;
+#endif
 
 #define MSM_FB_DEFAULT_PAGE_SIZE 2
 #define MFD_KEY  0x11161126
@@ -52,6 +71,17 @@ struct disp_info_type_suspend {
 	boolean sw_refreshing_enable;
 	boolean panel_power_on;
 };
+
+struct msmfb_writeback_data_list {
+	struct list_head registered_entry;
+	struct list_head active_entry;
+	void *addr;
+	struct file *pmem_file;
+	struct msmfb_data buf_info;
+	struct msmfb_img img;
+	int state;
+};
+
 
 struct msm_fb_data_type {
 	__u32 key;
@@ -116,7 +146,7 @@ struct msm_fb_data_type {
 	int (*lut_update) (struct fb_info *info,
 			      struct fb_cmap *cmap);
 	int (*do_histogram) (struct fb_info *info,
-			      struct mdp_histogram *hist);
+			      struct mdp_histogram_data *hist);
 	void *cursor_buf;
 	void *cursor_buf_phys;
 
@@ -150,16 +180,39 @@ struct msm_fb_data_type {
 	struct timer_list msmfb_no_update_notify_timer;
 	struct completion msmfb_update_notify;
 	struct completion msmfb_no_update_notify;
-	u32 ov_start, ov_end;
+	struct mutex writeback_mutex;
+	struct mutex unregister_mutex;
+	struct list_head writeback_busy_queue;
+	struct list_head writeback_free_queue;
+	struct list_head writeback_register_queue;
+	wait_queue_head_t wait_q;
+	struct ion_client *iclient;
+	struct mdp_buf_type *ov0_wb_buf;
+	struct mdp_buf_type *ov1_wb_buf;
+	u32 ov_start;
+	u32 mem_hid;
+	u32 mdp_rev;
+	u32 use_ov0_blt, ov0_blt_state;
+	u32 use_ov1_blt, ov1_blt_state;
+	u32 writeback_state;
+	int cont_splash_done;
 };
 
 struct dentry *msm_fb_get_debugfs_root(void);
 void msm_fb_debugfs_file_create(struct dentry *root, const char *name,
 				u32 *var);
-void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl);
+void msm_fb_set_backlight(struct msm_fb_data_type *mfd, __u32 bkl_lvl, __u32 bkl_lvl_fw);
 
 struct platform_device *msm_fb_add_device(struct platform_device *pdev);
-
+struct fb_info *msm_fb_get_writeback_fb(void);
+int msm_fb_writeback_init(struct fb_info *info);
+int msm_fb_writeback_start(struct fb_info *info);
+int msm_fb_writeback_queue_buffer(struct fb_info *info,
+		struct msmfb_data *data);
+int msm_fb_writeback_dequeue_buffer(struct fb_info *info,
+		struct msmfb_data *data);
+int msm_fb_writeback_stop(struct fb_info *info);
+int msm_fb_writeback_terminate(struct fb_info *info);
 int msm_fb_detect_client(const char *name);
 
 #ifdef CONFIG_FB_BACKLIGHT

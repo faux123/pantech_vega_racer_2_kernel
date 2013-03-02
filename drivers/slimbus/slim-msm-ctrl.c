@@ -240,7 +240,6 @@ struct msm_slim_ctrl {
 	bool			reconf_busy;
 	bool			chan_active;
 	enum msm_ctrl_state	state;
-	int			numdevs;
 };
 
 struct msm_slim_sat {
@@ -252,6 +251,8 @@ struct msm_slim_sat {
 	u16			*satch;
 	u8			nsatch;
 	bool			sent_capability;
+	bool			pending_reconf;
+	bool			pending_capability;
 	int			shead;
 	int			stail;
 	spinlock_t lock;
@@ -331,6 +332,36 @@ static bool msm_is_sat_dev(u8 *e_addr)
 		(e_addr[1] == QC_DEVID_SAT1 || e_addr[1] == QC_DEVID_SAT2))
 		return true;
 	return false;
+}
+
+static int msm_slim_get_ctrl(struct msm_slim_ctrl *dev)
+{
+#ifdef CONFIG_PM_RUNTIME
+	int ref = 0;
+	int ret = pm_runtime_get_sync(dev->dev);
+	if (ret >= 0) {
+		ref = atomic_read(&dev->dev->power.usage_count);
+		if (ref <= 0) {
+			dev_err(dev->dev, "reference count -ve:%d", ref);
+			ret = -ENODEV;
+		}
+	}
+	return ret;
+#else
+	return -ENODEV;
+#endif
+}
+static void msm_slim_put_ctrl(struct msm_slim_ctrl *dev)
+{
+#ifdef CONFIG_PM_RUNTIME
+	int ref;
+	pm_runtime_mark_last_busy(dev->dev);
+	ref = atomic_read(&dev->dev->power.usage_count);
+	if (ref <= 0)
+		dev_err(dev->dev, "reference count mismatch:%d", ref);
+	else
+		pm_runtime_put(dev->dev);
+#endif
 }
 
 static irqreturn_t msm_slim_interrupt(int irq, void *d)
@@ -461,11 +492,6 @@ static irqreturn_t msm_slim_interrupt(int irq, void *d)
 		 * before exiting ISR
 		 */
 		mb();
-		if (dev->ctrl.sched.usedslots == 0 &&
-			dev->state != MSM_CTRL_SLEEPING) {
-			dev->chan_active = false;
-			pm_runtime_put(dev->dev);
-		}
 		complete(&dev->reconf);
 	}
 	pstat = readl_relaxed(dev->base + PGD_PORT_INT_ST_EEn + (16 * dev->ee));
@@ -664,7 +690,9 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	u32 *pbuf;
 	u8 *puc;
 	int timeout;
+	int msgv = -1;
 	u8 la = txn->la;
+	u8 mc = (u8)(txn->mc & 0xFF);
 	/*
 	 * Voting for runtime PM: Slimbus has 2 possible use cases:
 	 * 1. messaging
@@ -673,17 +701,20 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	 * use their own slots
 	 * This "get" votes for messaging bandwidth
 	 */
-	if (dev->state != MSM_CTRL_SLEEPING)
-		pm_runtime_get_sync(dev->dev);
+	if (!(txn->mc & SLIM_MSG_CLK_PAUSE_SEQ_FLG))
+		msgv = msm_slim_get_ctrl(dev);
 	mutex_lock(&dev->tx_lock);
-	if (dev->state == MSM_CTRL_ASLEEP) {
+	if (dev->state == MSM_CTRL_ASLEEP ||
+		((!(txn->mc & SLIM_MSG_CLK_PAUSE_SEQ_FLG)) &&
+		dev->state == MSM_CTRL_SLEEPING)) {
 		dev_err(dev->dev, "runtime or system PM suspended state");
 		mutex_unlock(&dev->tx_lock);
-		pm_runtime_put(dev->dev);
+		if (msgv >= 0)
+			msm_slim_put_ctrl(dev);
 		return -EBUSY;
 	}
 	if (txn->mt == SLIM_MSG_MT_CORE &&
-		txn->mc == SLIM_MSG_MC_BEGIN_RECONFIGURATION) {
+		mc == SLIM_MSG_MC_BEGIN_RECONFIGURATION) {
 		if (dev->reconf_busy) {
 			wait_for_completion(&dev->reconf);
 			dev->reconf_busy = false;
@@ -691,9 +722,9 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 		/* This "get" votes for data channels */
 		if (dev->ctrl.sched.usedslots != 0 &&
 			!dev->chan_active) {
-			dev->chan_active = true;
-			if (dev->state != MSM_CTRL_SLEEPING)
-				pm_runtime_get(dev->dev);
+			int chv = msm_slim_get_ctrl(dev);
+			if (chv >= 0)
+				dev->chan_active = true;
 		}
 	}
 	txn->rl--;
@@ -703,21 +734,19 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 
 	if (txn->dt == SLIM_MSG_DEST_ENUMADDR) {
 		mutex_unlock(&dev->tx_lock);
-		if (dev->state != MSM_CTRL_SLEEPING)
-			pm_runtime_put(dev->dev);
+		if (msgv >= 0)
+			msm_slim_put_ctrl(dev);
 		return -EPROTONOSUPPORT;
 	}
 	if (txn->mt == SLIM_MSG_MT_CORE && txn->la == 0xFF &&
-		(txn->mc == SLIM_MSG_MC_CONNECT_SOURCE ||
-		 txn->mc == SLIM_MSG_MC_CONNECT_SINK ||
-		 txn->mc == SLIM_MSG_MC_DISCONNECT_PORT))
+		(mc == SLIM_MSG_MC_CONNECT_SOURCE ||
+		 mc == SLIM_MSG_MC_CONNECT_SINK ||
+		 mc == SLIM_MSG_MC_DISCONNECT_PORT))
 		la = dev->pgdla;
 	if (txn->dt == SLIM_MSG_DEST_LOGICALADDR)
-		*pbuf = SLIM_MSG_ASM_FIRST_WORD(txn->rl, txn->mt, txn->mc,
-					0, la);
+		*pbuf = SLIM_MSG_ASM_FIRST_WORD(txn->rl, txn->mt, mc, 0, la);
 	else
-		*pbuf = SLIM_MSG_ASM_FIRST_WORD(txn->rl, txn->mt, txn->mc,
-					1, la);
+		*pbuf = SLIM_MSG_ASM_FIRST_WORD(txn->rl, txn->mt, mc, 1, la);
 	if (txn->dt == SLIM_MSG_DEST_LOGICALADDR)
 		puc = ((u8 *)pbuf) + 3;
 	else
@@ -725,20 +754,20 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 	if (txn->rbuf)
 		*(puc++) = txn->tid;
 	if ((txn->mt == SLIM_MSG_MT_CORE) &&
-		((txn->mc >= SLIM_MSG_MC_REQUEST_INFORMATION &&
-		txn->mc <= SLIM_MSG_MC_REPORT_INFORMATION) ||
-		(txn->mc >= SLIM_MSG_MC_REQUEST_VALUE &&
-		 txn->mc <= SLIM_MSG_MC_CHANGE_VALUE))) {
+		((mc >= SLIM_MSG_MC_REQUEST_INFORMATION &&
+		mc <= SLIM_MSG_MC_REPORT_INFORMATION) ||
+		(mc >= SLIM_MSG_MC_REQUEST_VALUE &&
+		 mc <= SLIM_MSG_MC_CHANGE_VALUE))) {
 		*(puc++) = (txn->ec & 0xFF);
 		*(puc++) = (txn->ec >> 8)&0xFF;
 	}
 	if (txn->wbuf)
 		memcpy(puc, txn->wbuf, txn->len);
 	if (txn->mt == SLIM_MSG_MT_CORE && txn->la == 0xFF &&
-		(txn->mc == SLIM_MSG_MC_CONNECT_SOURCE ||
-		 txn->mc == SLIM_MSG_MC_CONNECT_SINK ||
-		 txn->mc == SLIM_MSG_MC_DISCONNECT_PORT)) {
-		if (txn->mc != SLIM_MSG_MC_DISCONNECT_PORT)
+		(mc == SLIM_MSG_MC_CONNECT_SOURCE ||
+		 mc == SLIM_MSG_MC_CONNECT_SINK ||
+		 mc == SLIM_MSG_MC_DISCONNECT_PORT)) {
+		if (mc != SLIM_MSG_MC_DISCONNECT_PORT)
 			dev->err = msm_slim_connect_pipe_port(dev, *puc);
 		else {
 			struct msm_slim_endp *endpoint = &dev->pipes[*puc];
@@ -752,36 +781,57 @@ static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 			 */
 			dev->pipes[*puc].connected = false;
 			mutex_unlock(&dev->tx_lock);
-			if (dev->state != MSM_CTRL_SLEEPING)
-				pm_runtime_put(dev->dev);
+			if (msgv >= 0)
+				msm_slim_put_ctrl(dev);
 			return 0;
 		}
 		if (dev->err) {
 			dev_err(dev->dev, "pipe-port connect err:%d", dev->err);
 			mutex_unlock(&dev->tx_lock);
-			if (dev->state != MSM_CTRL_SLEEPING)
-				pm_runtime_put(dev->dev);
+			if (msgv >= 0)
+				msm_slim_put_ctrl(dev);
 			return dev->err;
 		}
 		*(puc) = *(puc) + dev->pipe_b;
 	}
 	if (txn->mt == SLIM_MSG_MT_CORE &&
-		txn->mc == SLIM_MSG_MC_BEGIN_RECONFIGURATION)
+		mc == SLIM_MSG_MC_BEGIN_RECONFIGURATION)
 		dev->reconf_busy = true;
 	dev->wr_comp = &done;
 	msm_send_msg_buf(ctrl, pbuf, txn->rl);
 	timeout = wait_for_completion_timeout(&done, HZ);
 
-	if (dev->state == MSM_CTRL_SLEEPING &&
-			txn->mc == SLIM_MSG_MC_RECONFIGURE_NOW &&
-			txn->mt == SLIM_MSG_MT_CORE && timeout) {
-		timeout = wait_for_completion_timeout(&dev->reconf, HZ);
-		if (timeout)
+	if (mc == SLIM_MSG_MC_RECONFIGURE_NOW) {
+		if ((txn->mc == (SLIM_MSG_MC_RECONFIGURE_NOW |
+					SLIM_MSG_CLK_PAUSE_SEQ_FLG)) &&
+				timeout) {
+			timeout = wait_for_completion_timeout(&dev->reconf, HZ);
 			dev->reconf_busy = false;
+			if (timeout) {
+				clk_disable(dev->rclk);
+				disable_irq(dev->irq);
+			}
+		}
+		if ((txn->mc == (SLIM_MSG_MC_RECONFIGURE_NOW |
+					SLIM_MSG_CLK_PAUSE_SEQ_FLG)) &&
+				!timeout) {
+			dev->reconf_busy = false;
+			dev_err(dev->dev, "clock pause failed");
+			mutex_unlock(&dev->tx_lock);
+			return -ETIMEDOUT;
+		}
+		if (txn->mt == SLIM_MSG_MT_CORE &&
+			txn->mc == SLIM_MSG_MC_RECONFIGURE_NOW) {
+			if (dev->ctrl.sched.usedslots == 0 &&
+					dev->chan_active) {
+				dev->chan_active = false;
+				msm_slim_put_ctrl(dev);
+			}
+		}
 	}
 	mutex_unlock(&dev->tx_lock);
-	if (!txn->rbuf && dev->state != MSM_CTRL_SLEEPING)
-		pm_runtime_put(dev->dev);
+	if (msgv >= 0)
+		msm_slim_put_ctrl(dev);
 
 	if (!timeout)
 		dev_err(dev->dev, "TX timed out:MC:0x%x,mt:0x%x", txn->mc,
@@ -975,8 +1025,8 @@ static void msm_slim_rxwq(struct msm_slim_ctrl *dev)
 				e_addr[1] == QC_DEVID_PGD &&
 				e_addr[2] != QC_CHIPID_SL)
 				dev->pgdla = laddr;
-			dev->numdevs++;
-			if (!ret && dev->numdevs == QC_MSM_DEVS)
+			if (!ret && !pm_runtime_enabled(dev->dev) &&
+				laddr == (QC_MSM_DEVS - 1))
 				pm_runtime_enable(dev->dev);
 
 		} else if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
@@ -985,7 +1035,7 @@ static void msm_slim_rxwq(struct msm_slim_ctrl *dev)
 			dev_dbg(dev->dev, "tid:%d, len:%d\n", tid, len - 4);
 			slim_msg_response(&dev->ctrl, &buf[4], tid,
 						len - 4);
-			pm_runtime_put(dev->dev);
+			pm_runtime_mark_last_busy(dev->dev);
 		} else if (mc == SLIM_MSG_MC_REPORT_INFORMATION) {
 			u8 l_addr = buf[2];
 			u16 ele = (u16)buf[4] << 4;
@@ -1018,6 +1068,7 @@ static void slim_sat_rxprocess(struct work_struct *work)
 		u8 len, mc, mt;
 		u32 bw_sl;
 		int ret = 0;
+		int satv = -1;
 		bool gen_ack = false;
 		u8 tid;
 		u8 wbuf[8];
@@ -1038,17 +1089,26 @@ static void slim_sat_rxprocess(struct work_struct *work)
 			for (i = 0; i < 6; i++)
 				e_addr[i] = buf[7-i];
 
-			pm_runtime_get_sync(dev->dev);
+			if (pm_runtime_enabled(dev->dev)) {
+				satv = msm_slim_get_ctrl(dev);
+				if (satv >= 0)
+					sat->pending_capability = true;
+			}
 			slim_assign_laddr(&dev->ctrl, e_addr, 6, &laddr);
 			sat->satcl.laddr = laddr;
 		} else if (mt != SLIM_MSG_MT_CORE &&
-				mc != SLIM_MSG_MC_REPORT_PRESENT)
-			pm_runtime_get_sync(dev->dev);
+				mc != SLIM_MSG_MC_REPORT_PRESENT) {
+			satv = msm_slim_get_ctrl(dev);
+		}
 		switch (mc) {
 		case SLIM_MSG_MC_REPORT_PRESENT:
 			/* Remove runtime_pm vote once satellite acks */
 			if (mt != SLIM_MSG_MT_CORE) {
-				pm_runtime_put(dev->dev);
+				if (pm_runtime_enabled(dev->dev) &&
+					sat->pending_capability) {
+					msm_slim_put_ctrl(dev);
+					sat->pending_capability = false;
+				}
 				continue;
 			}
 			/* send a Manager capability msg */
@@ -1106,11 +1166,20 @@ static void slim_sat_rxprocess(struct work_struct *work)
 					"SAT define_ch returned:%d",
 					ret);
 			}
+			if (!sat->pending_reconf) {
+				int chv = msm_slim_get_ctrl(dev);
+				if (chv >= 0)
+					sat->pending_reconf = true;
+			}
 			break;
 		case SLIM_USR_MC_RECONFIG_NOW:
 			tid = buf[3];
 			gen_ack = true;
 			ret = slim_reconfigure_now(&sat->satcl);
+			if (sat->pending_reconf) {
+				msm_slim_put_ctrl(dev);
+				sat->pending_reconf = false;
+			}
 			break;
 		case SLIM_USR_MC_REQ_BW:
 			/* what we get is in SLOTS */
@@ -1152,10 +1221,11 @@ static void slim_sat_rxprocess(struct work_struct *work)
 			break;
 		}
 		if (!gen_ack) {
-			if (mc != SLIM_MSG_MC_REPORT_PRESENT)
-				pm_runtime_put(dev->dev);
+			if (mc != SLIM_MSG_MC_REPORT_PRESENT && satv >= 0)
+				msm_slim_put_ctrl(dev);
 			continue;
 		}
+
 		wbuf[0] = tid;
 		if (!ret)
 			wbuf[1] = MSM_SAT_SUCCSS;
@@ -1168,7 +1238,8 @@ static void slim_sat_rxprocess(struct work_struct *work)
 		txn.wbuf = wbuf;
 		txn.mt = SLIM_MSG_MT_SRC_REFERRED_USER;
 		msm_xfer_msg(&dev->ctrl, &txn);
-		pm_runtime_put(dev->dev);
+		if (satv >= 0)
+			msm_slim_put_ctrl(dev);
 	}
 }
 
@@ -1676,11 +1747,7 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 		dev->framer.rootfreq / SLIM_CL_PER_SUPERFRAME_DIV8;
 	dev->ctrl.a_framer = &dev->framer;
 	dev->ctrl.clkgear = SLIM_MAX_CLK_GEAR;
-	ret = slim_add_numbered_controller(&dev->ctrl);
-	if (ret) {
-		dev_err(dev->dev, "error adding controller\n");
-		goto err_ctrl_failed;
-	}
+	dev->ctrl.dev.parent = &pdev->dev;
 
 	ret = request_irq(dev->irq, msm_slim_interrupt, IRQF_TRIGGER_HIGH,
 				"msm_slim_irq", dev);
@@ -1729,6 +1796,13 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	 */
 	wmb();
 
+	/* Register with framework before enabling frame, clock */
+	ret = slim_add_numbered_controller(&dev->ctrl);
+	if (ret) {
+		dev_err(dev->dev, "error adding controller\n");
+		goto err_ctrl_failed;
+	}
+
 	/* Framer register initialization */
 	writel_relaxed((0xA << REF_CLK_GEAR) | (0xA << CLK_GEAR) |
 		(1 << ROOT_FREQ) | (1 << FRM_ACTIVE) | 1,
@@ -1775,14 +1849,16 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, MSM_SLIM_AUTOSUSPEND);
 	pm_runtime_set_active(&pdev->dev);
+
 	dev_dbg(dev->dev, "MSM SB controller is up!\n");
 	return 0;
 
+err_ctrl_failed:
+	writel_relaxed(0, dev->base + COMP_CFG);
+	kfree(dev->satd);
 err_sat_failed:
 	free_irq(dev->irq, dev);
 err_request_irq_failed:
-	slim_del_controller(&dev->ctrl);
-err_ctrl_failed:
 	clk_disable(dev->rclk);
 	clk_put(dev->rclk);
 err_clk_get_failed:
@@ -1837,10 +1913,7 @@ static int __devexit msm_slim_remove(struct platform_device *pdev)
 #ifdef CONFIG_PM_RUNTIME
 static int msm_slim_runtime_idle(struct device *device)
 {
-	struct platform_device *pdev = to_platform_device(device);
-	struct msm_slim_ctrl *dev = platform_get_drvdata(pdev);
 	dev_dbg(device, "pm_runtime: idle...\n");
-	pm_runtime_mark_last_busy(dev->dev);
 	pm_request_autosuspend(device);
 	return -EAGAIN;
 }
@@ -1851,6 +1924,7 @@ static int msm_slim_runtime_idle(struct device *device)
  * functions to be called from system suspend/resume. So they are not
  * inside ifdef CONFIG_PM_RUNTIME
  */
+#ifdef CONFIG_PM_SLEEP
 static int msm_slim_runtime_suspend(struct device *device)
 {
 	struct platform_device *pdev = to_platform_device(device);
@@ -1859,13 +1933,12 @@ static int msm_slim_runtime_suspend(struct device *device)
 	dev_dbg(device, "pm_runtime: suspending...\n");
 	dev->state = MSM_CTRL_SLEEPING;
 	ret = slim_ctrl_clk_pause(&dev->ctrl, false, SLIM_CLK_UNSPECIFIED);
-	/* Make sure clock pause goes through */
-	if (!ret) {
-		clk_disable(dev->rclk);
-		disable_irq(dev->irq);
-		dev->state = MSM_CTRL_ASLEEP;
-	} else
+	if (ret) {
+		dev_err(device, "clk pause not entered:%d", ret);
 		dev->state = MSM_CTRL_AWAKE;
+	} else {
+		dev->state = MSM_CTRL_ASLEEP;
+	}
 	return ret;
 }
 
@@ -1875,19 +1948,17 @@ static int msm_slim_runtime_resume(struct device *device)
 	struct msm_slim_ctrl *dev = platform_get_drvdata(pdev);
 	int ret = 0;
 	dev_dbg(device, "pm_runtime: resuming...\n");
-	mutex_lock(&dev->tx_lock);
-	if (dev->state == MSM_CTRL_ASLEEP) {
-		mutex_unlock(&dev->tx_lock);
+	if (dev->state == MSM_CTRL_ASLEEP)
 		ret = slim_ctrl_clk_pause(&dev->ctrl, true, 0);
-		if (!ret)
-			dev->state = MSM_CTRL_AWAKE;
-		return ret;
+	if (ret) {
+		dev_err(device, "clk pause not exited:%d", ret);
+		dev->state = MSM_CTRL_ASLEEP;
+	} else {
+		dev->state = MSM_CTRL_AWAKE;
 	}
-	mutex_unlock(&dev->tx_lock);
 	return ret;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int msm_slim_suspend(struct device *dev)
 {
 	int ret = 0;
@@ -1913,8 +1984,15 @@ static int msm_slim_resume(struct device *dev)
 {
 	/* If runtime_pm is enabled, this resume shouldn't do anything */
 	if (!pm_runtime_enabled(dev) || !pm_runtime_suspended(dev)) {
+		int ret;
 		dev_dbg(dev, "system resume");
-		return msm_slim_runtime_resume(dev);
+		ret = msm_slim_runtime_resume(dev);
+		if (!ret) {
+			pm_runtime_mark_last_busy(dev);
+			pm_request_autosuspend(dev);
+		}
+		return ret;
+
 	}
 	return 0;
 }

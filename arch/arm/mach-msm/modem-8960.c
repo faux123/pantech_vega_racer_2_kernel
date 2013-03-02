@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,12 +26,15 @@
 #include <mach/peripheral-loader.h>
 #include <mach/subsystem_restart.h>
 #include <mach/subsystem_notif.h>
-#include <mach/irqs-8960.h>
 #include <mach/socinfo.h>
 
 #include "smd_private.h"
 #include "modem_notifier.h"
 #include "ramdump.h"
+
+#ifdef CONFIG_PANTECH_ERR_CRASH_LOGGING
+#define MODULE_NAME			"modem_8960"
+#endif
 
 static int crash_shutdown;
 
@@ -51,7 +54,11 @@ static void modem_sw_fatal_fn(struct work_struct *work)
 		pr_err("Modem SMSM state changed to SMSM_RESET.\n"
 			"Probable err_fatal on the modem. "
 			"Calling subsystem restart...\n");
+#ifdef FEATURE_PANTECH_WLAN_QCOM_PATCH //lee.eunsuk 20120423, SSR
+		panic(MODULE_NAME "Modem crashed.");
+#else
 		subsystem_restart("modem");
+#endif 
 
 	} else if (modem_state & reset_smsm_states) {
 
@@ -61,14 +68,22 @@ static void modem_sw_fatal_fn(struct work_struct *work)
 		kernel_restart(NULL);
 	} else {
 		/* TODO: Bus unlock code/sequence goes _here_ */
+#ifdef FEATURE_PANTECH_WLAN_QCOM_PATCH //lee.eunsuk 20120423, SSR
+		panic(MODULE_NAME "Modem crashed.");
+#else
 		subsystem_restart("modem");
+#endif 
 	}
 }
 
 static void modem_fw_fatal_fn(struct work_struct *work)
 {
 	pr_err("Watchdog bite received from modem FW!\n");
+#ifdef FEATURE_PANTECH_WLAN_QCOM_PATCH //lee.eunsuk 20120423, SSR
+	panic(MODULE_NAME "Modem crashed.");
+#else
 	subsystem_restart("modem");
+#endif 
 }
 
 static DECLARE_WORK(modem_sw_fatal_work, modem_sw_fatal_fn);
@@ -84,7 +99,11 @@ static void smsm_state_cb(void *data, uint32_t old_state, uint32_t new_state)
 		pr_err("Modem SMSM state changed to SMSM_RESET.\n"
 			"Probable err_fatal on the modem. "
 			"Calling subsystem restart...\n");
+#ifdef FEATURE_PANTECH_WLAN_QCOM_PATCH //lee.eunsuk 20120423, SSR
+		panic(MODULE_NAME "Modem crashed.");
+#else
 		subsystem_restart("modem");
+#endif 
 	}
 }
 
@@ -94,14 +113,6 @@ static int modem_shutdown(const struct subsys_data *subsys)
 {
 	void __iomem *q6_fw_wdog_addr;
 	void __iomem *q6_sw_wdog_addr;
-	int smsm_notif_unregistered = 0;
-
-	if (!(smsm_get_state(SMSM_MODEM_STATE) & SMSM_RESET)) {
-		smsm_state_cb_deregister(SMSM_MODEM_STATE, SMSM_RESET,
-			smsm_state_cb, 0);
-		smsm_notif_unregistered = 1;
-		smsm_reset_modem(SMSM_RESET);
-	}
 
 	/*
 	 * Disable the modem watchdog since it keeps running even after the
@@ -128,10 +139,6 @@ static int modem_shutdown(const struct subsys_data *subsys)
 	disable_irq_nosync(Q6FW_WDOG_EXPIRED_IRQ);
 	disable_irq_nosync(Q6SW_WDOG_EXPIRED_IRQ);
 
-	if (smsm_notif_unregistered)
-		smsm_state_cb_register(SMSM_MODEM_STATE, SMSM_RESET,
-			smsm_state_cb, 0);
-
 	return 0;
 }
 
@@ -150,9 +157,58 @@ void modem_crash_shutdown(const struct subsys_data *subsys)
 	smsm_reset_modem(SMSM_RESET);
 }
 
-int modem_ramdump(int enable, const struct subsys_data *subsys)
+/* FIXME: Get address, size from PIL */
+static struct ramdump_segment modemsw_segments[] = {
+	{0x89000000, 0x8D400000 - 0x89000000},
+};
+
+static struct ramdump_segment modemfw_segments[] = {
+	{0x8D400000, 0x8DA00000 - 0x8D400000},
+};
+
+static struct ramdump_segment smem_segments[] = {
+	{0x80000000, 0x00200000},
+};
+
+static void *modemfw_ramdump_dev;
+static void *modemsw_ramdump_dev;
+static void *smem_ramdump_dev;
+
+static int modem_ramdump(int enable,
+				const struct subsys_data *crashed_subsys)
 {
-	return 0;
+	int ret = 0;
+
+	if (enable) {
+		ret = do_ramdump(modemsw_ramdump_dev, modemsw_segments,
+			ARRAY_SIZE(modemsw_segments));
+
+		if (ret < 0) {
+			pr_err("Unable to dump modem sw memory (rc = %d).\n",
+			       ret);
+			goto out;
+		}
+
+		ret = do_ramdump(modemfw_ramdump_dev, modemfw_segments,
+			ARRAY_SIZE(modemfw_segments));
+
+		if (ret < 0) {
+			pr_err("Unable to dump modem fw memory (rc = %d).\n",
+				ret);
+			goto out;
+		}
+
+		ret = do_ramdump(smem_ramdump_dev, smem_segments,
+			ARRAY_SIZE(smem_segments));
+
+		if (ret < 0) {
+			pr_err("Unable to dump smem memory (rc = %d).\n", ret);
+			goto out;
+		}
+	}
+
+out:
+	return ret;
 }
 
 static irqreturn_t modem_wdog_bite_irq(int irq, void *dev_id)
@@ -227,7 +283,7 @@ static int __init modem_8960_init(void)
 {
 	int ret;
 
-	if (!cpu_is_msm8960() && !cpu_is_msm8930())
+	if (!cpu_is_msm8960() && !cpu_is_msm8930() && !cpu_is_msm9615())
 		return -ENODEV;
 
 	ret = smsm_state_cb_register(SMSM_MODEM_STATE, SMSM_RESET,
@@ -264,9 +320,36 @@ static int __init modem_8960_init(void)
 		goto out;
 	}
 
+	modemfw_ramdump_dev = create_ramdump_device("modem_fw");
+
+	if (!modemfw_ramdump_dev) {
+		pr_err("%s: Unable to create modem fw ramdump device. (%d)\n",
+				__func__, -ENOMEM);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	modemsw_ramdump_dev = create_ramdump_device("modem_sw");
+
+	if (!modemsw_ramdump_dev) {
+		pr_err("%s: Unable to create modem sw ramdump device. (%d)\n",
+				__func__, -ENOMEM);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	smem_ramdump_dev = create_ramdump_device("smem");
+
+	if (!smem_ramdump_dev) {
+		pr_err("%s: Unable to create smem ramdump device. (%d)\n",
+				__func__, -ENOMEM);
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	ret = modem_debugfs_init();
 
-	pr_info("%s: 8960 modem fatal driver init'ed.\n", __func__);
+	pr_info("%s: modem fatal driver init'ed.\n", __func__);
 out:
 	return ret;
 }

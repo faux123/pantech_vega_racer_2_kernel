@@ -244,7 +244,7 @@ config BATTERY_MSM
 
 config BATTERY_MSM8X60
 	tristate "MSM8X60 battery"
-	select PMIC8058_BATTALARM
+	select PMIC8XXX_BATTALARM
 	help
 	  Some MSM boards have dual charging paths to charge the battery.
 	  Say Y to enable support for the battery charging in
@@ -261,7 +261,8 @@ config PM8058_CHARGER
 
 config ISL9519_CHARGER
 	tristate "isl9519 charger"
-	depends on BATTERY_MSM8X60
+	depends on (BATTERY_MSM8X60 || PM8921_CHARGER)
+	depends on I2C
 	default n
 	help
 	  The isl9519q charger chip from intersil is connected to an external
@@ -331,7 +332,21 @@ config PM8921_CHARGER
 	help
 	  Say Y here to enable support for pm8921 chip charger subdevice
 
+config PM8XXX_CCADC
+	tristate "PM8XXX battery current adc driver"
+	depends on MFD_PM8921_CORE
+	help
+	  Say Y here to enable support for pm8921 chip bms subdevice
+
+config LTC4088_CHARGER
+	tristate "LTC4088 Charger driver"
+	depends on GPIOLIB
+	help
+	  Say Y here to enable support for ltc4088 chip charger. It controls the
+	  operations through GPIO pins.
+
 config PM8921_BMS
+	select PM8XXX_CCADC
 	tristate "PM8921 Battery Monitoring System driver"
 	depends on MFD_PM8921_CORE
 	help

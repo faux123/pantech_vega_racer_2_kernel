@@ -131,7 +131,7 @@ config GENERIC_IRQ_PROBE
 
 config GENERIC_LOCKBREAK
 	bool
-	default y
+	default y if !ARM_TICKET_LOCKS
 	depends on SMP && PREEMPT
 
 config ARM_TICKET_LOCKS
@@ -140,7 +140,7 @@ config ARM_TICKET_LOCKS
 	  Enable ticket locks, which help preserve fairness among
 	  contended locks and prevent livelock in multicore systems.
 	  Say 'y' if system stability is important.
-	default y if ARCH_MSM_SCORPIONMP
+	default y if ARCH_MSM_SCORPIONMP || ARCH_MSM_KRAITMP
 	depends on SMP
 
 config RWSEM_GENERIC_SPINLOCK
@@ -221,6 +221,10 @@ config ARM_PATCH_PHYS_VIRT_16BIT
 	  This option extends the physical to virtual translation patching
 	  to allow physical memory down to a theoretical minimum of 64K
 	  boundaries.
+
+config GENERIC_BUG
+	def_bool y
+	depends on BUG
 
 source "init/Kconfig"
 
@@ -1344,6 +1348,20 @@ source "drivers/pci/Kconfig"
 
 source "drivers/pcmcia/Kconfig"
 
+config ARM_ERRATA_764369
+	bool "ARM errata: Data cache line maintenance operation by MVA may not succeed"
+	depends on CPU_V7 && SMP
+	help
+	  This option enables the workaround for erratum 764369
+	  affecting Cortex-A9 MPCore with two or more processors (all
+	  current revisions). Under certain timing circumstances, a data
+	  cache line maintenance operation by MVA targeting an Inner
+	  Shareable memory region may fail to proceed up to either the
+	  Point of Coherency or to the Point of Unification of the
+	  system. This workaround adds a DSB instruction before the
+	  relevant cache maintenance functions and sets a specific bit
+	  in the diagnostic control register of the SCU.
+
 endmenu
 
 menu "Kernel Features"
@@ -1395,6 +1413,12 @@ config HAVE_ARM_SCU
 	depends on SMP
 	help
 	  This option enables support for the ARM system coherency unit
+
+config ARM_ARCH_TIMER
+	bool "Architected timer support"
+	select TICK_ONESHOT
+	help
+	  This option enables support for the ARM architected timer
 
 config HAVE_ARM_TWD
 	bool
@@ -1596,21 +1620,30 @@ source "mm/Kconfig"
 
 config ARCH_MEMORY_PROBE
 	def_bool n
-	depends on MEMORY_HOTPLUG
 
 config ARCH_MEMORY_REMOVE
 	def_bool n
-	depends on MEMORY_HOTPLUG
 
 config ARCH_POPULATES_NODE_MAP
 	def_bool n
-	depends on MEMORY_HOTPLUG
+
+config ENABLE_DMM
+	def_bool n
 
 config FIX_MOVABLE_ZONE
 	def_bool n
-	depends on MEMORY_HOTPLUG
 
 config DONT_MAP_HOLE_AFTER_MEMBANK0
+	def_bool n
+	depends on SPARSEMEM
+
+config ARCH_ENABLE_MEMORY_HOTPLUG
+	def_bool n
+
+config ARCH_ENABLE_MEMORY_HOTREMOVE
+	def_bool n
+
+config HOLES_IN_ZONE
 	def_bool n
 	depends on SPARSEMEM
 

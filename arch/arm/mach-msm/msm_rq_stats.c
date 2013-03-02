@@ -55,7 +55,7 @@ static ssize_t show_run_queue_avg(struct kobject *kobj,
 	rq_info.rq_avg = 0;
 	spin_unlock_irqrestore(&rq_lock, flags);
 
-	return sprintf(buf, "%d.%d\n", val/10, val%10);
+	return snprintf(buf, PAGE_SIZE, "%d.%d\n", val/10, val%10);
 }
 
 static ssize_t show_run_queue_poll_ms(struct kobject *kobj,
@@ -95,10 +95,7 @@ static ssize_t store_run_queue_poll_ms(struct kobject *kobj,
 static ssize_t show_def_timer_ms(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	int64_t diff_ms;
-	diff_ms = ktime_to_ns(ktime_get()) - rq_info.def_start_time;
-	do_div(diff_ms, 1000 * 1000);
-	return snprintf(buf, MAX_LONG_SIZE, "%lld\n", diff_ms);
+	return snprintf(buf, MAX_LONG_SIZE, "%u\n", rq_info.def_interval);
 }
 
 static ssize_t store_def_timer_ms(struct kobject *kobj,
@@ -160,20 +157,20 @@ static int init_rq_attribs(void)
 
 	for (i = 0; i < attr_count - 1 ; i++) {
 		if (!attribs[i])
-			goto rel;
+			goto rel2;
 	}
 
 	rq_info.attr_group = kzalloc(sizeof(struct attribute_group),
 						GFP_KERNEL);
 	if (!rq_info.attr_group)
-		goto rel;
+		goto rel3;
 	rq_info.attr_group->attrs = attribs;
 
 	/* Create /sys/devices/system/cpu/cpu0/rq-stats/... */
 	rq_info.kobj = kobject_create_and_add("rq-stats",
 			&get_cpu_sysdev(0)->kobj);
 	if (!rq_info.kobj)
-		goto rel;
+		goto rel3;
 
 	err = sysfs_create_group(rq_info.kobj, rq_info.attr_group);
 	if (err)
@@ -184,18 +181,22 @@ static int init_rq_attribs(void)
 	if (!err)
 		return err;
 
-rel:
-	for (i = 0; i < attr_count - 1 ; i++)
-		kfree(attribs[i]);
-	kfree(attribs);
+rel3:
 	kfree(rq_info.attr_group);
 	kfree(rq_info.kobj);
+rel2:
+	for (i = 0; i < attr_count - 1; i++)
+		kfree(attribs[i]);
+rel:
+	kfree(attribs);
 
 	return -ENOMEM;
 }
 
 static int __init msm_rq_stats_init(void)
 {
+	int ret;
+
 	rq_wq = create_singlethread_workqueue("rq_stats");
 	BUG_ON(!rq_wq);
 	INIT_WORK(&rq_info.def_timer_work, def_work_fn);
@@ -204,7 +205,9 @@ static int __init msm_rq_stats_init(void)
 	rq_info.def_timer_jiffies = DEFAULT_DEF_TIMER_JIFFIES;
 	rq_info.rq_poll_last_jiffy = 0;
 	rq_info.def_timer_last_jiffy = 0;
+	ret = init_rq_attribs();
+
 	rq_info.init = 1;
-	return init_rq_attribs();
+	return ret;
 }
 late_initcall(msm_rq_stats_init);

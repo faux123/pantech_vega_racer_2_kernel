@@ -1057,9 +1057,7 @@ failure_unwind:
 static int __init iommu_init(void)
 {
 	int ret;
-
-	if (cpu_is_msm8960() &&
-	    SOCINFO_VERSION_MAJOR(socinfo_get_version()) < 2) {
+	if (!msm_soc_version_supports_iommu()) {
 		pr_err("IOMMU is not supported on this SoC version.\n");
 		return -ENODEV;
 	}

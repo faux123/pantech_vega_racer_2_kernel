@@ -649,8 +649,11 @@ static int mmc_sd_init_uhs_card(struct mmc_card *card)
 		goto out;
 
 	/* SPI mode doesn't define CMD19 */
-	if (!mmc_host_is_spi(card->host) && card->host->ops->execute_tuning)
+	if (!mmc_host_is_spi(card->host) && card->host->ops->execute_tuning) {
+		mmc_host_clk_hold(card->host);
 		err = card->host->ops->execute_tuning(card->host);
+		mmc_host_clk_release(card->host);
+	}
 
 out:
 	kfree(status);
@@ -741,7 +744,9 @@ int mmc_sd_get_cid(struct mmc_host *host, u32 ocr, u32 *cid, u32 *rocr)
 	    MMC_CAP_SET_XPC_180))
 		ocr |= SD_OCR_XPC;
 
+#ifndef CONFIG_PANTECH_SDCARD_HIGH_VOLTAGE_FIX // 20120127 jylee
 try_again:
+#endif
 	err = mmc_send_app_op_cond(host, ocr, rocr);
 	if (err)
 		return err;
@@ -750,6 +755,7 @@ try_again:
 	 * In case CCS and S18A in the response is set, start Signal Voltage
 	 * Switch procedure. SPI mode doesn't support CMD11.
 	 */
+#ifndef CONFIG_PANTECH_SDCARD_HIGH_VOLTAGE_FIX 
 	if (!mmc_host_is_spi(host) && rocr &&
 	   ((*rocr & 0x41000000) == 0x41000000)) {
 		err = mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180, true);
@@ -758,7 +764,7 @@ try_again:
 			goto try_again;
 		}
 	}
-
+#endif
 	if (mmc_host_is_spi(host))
 		err = mmc_send_cid(host, cid);
 	else
@@ -860,8 +866,11 @@ int mmc_sd_setup_card(struct mmc_host *host, struct mmc_card *card,
 	if (!reinit) {
 		int ro = -1;
 
-		if (host->ops->get_ro)
+		if (host->ops->get_ro) {
+			mmc_host_clk_hold(host);
 			ro = host->ops->get_ro(host);
+			mmc_host_clk_release(host);
+		}
 
 		if (ro < 0) {
 			printk(KERN_WARNING "%s: host does not "
@@ -979,8 +988,11 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 		 * Since initialization is now complete, enable preset
 		 * value registers for UHS-I cards.
 		 */
-		if (host->ops->enable_preset_value)
+		if (host->ops->enable_preset_value) {
+			mmc_host_clk_hold(host);
 			host->ops->enable_preset_value(host, true);
+			mmc_host_clk_release(host);
+		}
 	} else {
 		/*
 		 * Attempt to change to high-speed (if supported)
@@ -1035,6 +1047,14 @@ static void mmc_sd_remove(struct mmc_host *host)
 }
 
 /*
+ * Card detection - card is alive.
+ */
+static int mmc_sd_alive(struct mmc_host *host)
+{
+	return mmc_send_status(host->card, NULL);
+}
+
+/*
  * Card detection callback from host.
  */
 static void mmc_sd_detect(struct mmc_host *host)
@@ -1054,7 +1074,7 @@ static void mmc_sd_detect(struct mmc_host *host)
 	 */
 #ifdef CONFIG_MMC_PARANOID_SD_INIT
 	while(retries) {
-		err = mmc_send_status(host->card, NULL);
+		err = _mmc_detect_card_removed(host);
 		if (err) {
 			retries--;
 			udelay(5);
@@ -1067,7 +1087,7 @@ static void mmc_sd_detect(struct mmc_host *host)
 		       __func__, mmc_hostname(host), err);
 	}
 #else
-	err = mmc_send_status(host->card, NULL);
+	err = _mmc_detect_card_removed(host);
 #endif
 	mmc_release_host(host);
 
@@ -1154,6 +1174,7 @@ static const struct mmc_bus_ops mmc_sd_ops = {
 	.suspend = NULL,
 	.resume = NULL,
 	.power_restore = mmc_sd_power_restore,
+	.alive = mmc_sd_alive,
 };
 
 static const struct mmc_bus_ops mmc_sd_ops_unsafe = {
@@ -1162,6 +1183,7 @@ static const struct mmc_bus_ops mmc_sd_ops_unsafe = {
 	.suspend = mmc_sd_suspend,
 	.resume = mmc_sd_resume,
 	.power_restore = mmc_sd_power_restore,
+	.alive = mmc_sd_alive,
 };
 
 static void mmc_sd_attach_bus_ops(struct mmc_host *host)
@@ -1195,8 +1217,11 @@ int mmc_attach_sd(struct mmc_host *host)
 		return err;
 
 	/* Disable preset value enable if already set since last time */
-	if (host->ops->enable_preset_value)
+	if (host->ops->enable_preset_value) {
+		mmc_host_clk_hold(host);
 		host->ops->enable_preset_value(host, false);
+		mmc_host_clk_release(host);
+	}
 
 	err = mmc_send_app_op_cond(host, 0, &ocr);
 	if (err)

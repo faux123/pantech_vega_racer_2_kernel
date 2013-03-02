@@ -63,6 +63,10 @@
 #include "sirc.h"
 #include "pm-boot.h"
 
+#if defined(CONFIG_PANTECH_ERR_CRASH_LOGGING)
+#include "sky_sys_reset.h"
+#endif
+
 /******************************************************************************
  * Debug Definitions
  *****************************************************************************/
@@ -490,7 +494,11 @@ static void msm_pm_timeout(void)
 {
 #if defined(CONFIG_MSM_PM_TIMEOUT_RESET_CHIP)
 	printk(KERN_EMERG "%s(): resetting chip\n", __func__);
+#if defined(CONFIG_PANTECH_ERR_CRASH_LOGGING)
+	sky_sys_rst_SwReset_imm(NULL);
+#else
 	msm_proc_comm(PCOM_RESET_CHIP_IMM, NULL, NULL);
+#endif
 #elif defined(CONFIG_MSM_PM_TIMEOUT_RESET_MODEM)
 	printk(KERN_EMERG "%s(): resetting modem\n", __func__);
 	msm_proc_comm_reset_modem_now();
@@ -1731,7 +1739,12 @@ static void msm_pm_power_off(void)
 static void msm_pm_restart(char str, const char *cmd)
 {
 	msm_rpcrouter_close();
+
+#if defined(CONFIG_PANTECH_ERR_CRASH_LOGGING)
+	sky_sys_rst_UserReset_imm(&restart_reason);
+#else
 	msm_proc_comm(PCOM_RESET_CHIP, &restart_reason, 0);
+#endif
 
 	for (;;)
 		;
@@ -1780,6 +1793,9 @@ static int __init msm_pm_init(void)
 	struct proc_dir_entry *d_entry;
 #endif
 	int ret;
+#if defined(CONFIG_PANTECH_ERR_CRASH_LOGGING)
+	struct proc_dir_entry *reset_info;
+#endif
 #ifdef CONFIG_CPU_V7
 	pgd_t *pc_pgd;
 	pmd_t *pmd;
@@ -1818,6 +1834,21 @@ static int __init msm_pm_init(void)
 		printk(KERN_ERR "%s: failed to get smsm_data\n", __func__);
 		return -ENODEV;
 	}
+
+#if defined(CONFIG_PANTECH_ERR_CRASH_LOGGING)
+	sky_sys_rst_set_prev_reset_info();
+	reset_info = create_proc_entry("pantech_resetinfo",
+			S_IRUGO | S_IWUGO, NULL);
+
+	if (reset_info) {
+		reset_info->read_proc = sky_sys_rst_read_proc_reset_info;
+		reset_info->write_proc = sky_sys_rst_write_proc_reset_info;
+		reset_info->data = NULL;
+	}
+
+	//initialize default : sw_reset
+	sky_sys_rst_SetSwReset(NULL);
+#endif
 
 	ret = msm_timer_init_time_sync(msm_pm_timeout);
 	if (ret)

@@ -23,6 +23,10 @@
 #define MSM_SSBI2_I2C_BUS_ID     7
 #define MSM_SSBI3_I2C_BUS_ID     8
 
+#ifdef CONFIG_SKY_DMB_I2C_CMD
+#define MSM_GSBI11_QUP_I2C_BUS_ID 12
+#endif
+
 #ifdef CONFIG_SND_SOC_MSM8660_APQ
 extern struct platform_device msm_pcm;
 extern struct platform_device msm_pcm_routing;
@@ -58,7 +62,7 @@ extern struct platform_device msm_device_gpio;
 extern struct platform_device msm_device_vidc;
 
 extern struct platform_device msm_charm_modem;
-
+extern struct platform_device msm_device_tz_log;
 #ifdef CONFIG_HW_RANDOM_MSM
 extern struct platform_device msm_device_rng;
 #endif
@@ -68,12 +72,6 @@ void __init msm8x60_check_2d_hardware(void);
 
 #ifdef CONFIG_MSM_DSPS
 extern struct platform_device msm_dsps_device;
-#endif
-#ifdef CONFIG_MSM_QDSS
-extern struct platform_device msm_etb_device;
-extern struct platform_device msm_tpiu_device;
-extern struct platform_device msm_funnel_device;
-extern struct platform_device msm_ptm_device;
 #endif
 
 #if defined(CONFIG_MSM_RPM_STATS_LOG)

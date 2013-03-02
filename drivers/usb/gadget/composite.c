@@ -28,7 +28,6 @@
 
 #include <linux/usb/composite.h>
 
-
 /*
  * The code in this file is utility code, used to build a gadget driver
  * from one or more "function" drivers, one or more "configuration"
@@ -876,6 +875,9 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 
 	/* we handle all standard USB descriptors */
 	case USB_REQ_GET_DESCRIPTOR:
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+	  usb_data_transfer_callback();
+#endif
 		if (ctrl->bRequestType != USB_DIR_IN)
 			goto unknown;
 		switch (w_value >> 8) {
@@ -1375,3 +1377,11 @@ void usb_composite_setup_continue(struct usb_composite_dev *cdev)
 	spin_unlock_irqrestore(&cdev->lock, flags);
 }
 
+#ifdef	CONFIG_ANDROID_PANTECH_USB_ABNORMAL_CHARGER_INFO
+extern int get_udc_state(char *udc_state);
+int composite_get_udc_state(char *udc_state)
+{
+	return get_udc_state(udc_state);
+}
+EXPORT_SYMBOL(composite_get_udc_state);
+#endif

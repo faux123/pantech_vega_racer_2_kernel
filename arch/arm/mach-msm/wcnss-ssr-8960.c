@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,10 +17,13 @@
 #include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/wcnss_wlan.h>
 #include <mach/irqs.h>
 #include <mach/scm.h>
 #include <mach/subsystem_restart.h>
 #include <mach/subsystem_notif.h>
+#include <mach/peripheral-loader.h>
 #include "smd_private.h"
 #include "ramdump.h"
 
@@ -32,13 +35,18 @@ static DECLARE_WORK(riva_smsm_cb_work, riva_smsm_cb_fn);
 static void riva_fatal_fn(struct work_struct *);
 static DECLARE_WORK(riva_fatal_work, riva_fatal_fn);
 
+static struct delayed_work cancel_vote_work;
 static void *riva_ramdump_dev;
 static int riva_crash;
 static int ss_restart_inprogress;
+static int enable_riva_ssr;
 
 static void riva_smsm_cb_fn(struct work_struct *work)
 {
-	panic(MODULE_NAME ": SMSM reset request received from Riva");
+	if (!enable_riva_ssr)
+		panic(MODULE_NAME ": SMSM reset request received from Riva");
+	else
+		subsystem_restart("riva");
 }
 
 static void smsm_state_cb_hdlr(void *data, uint32_t old_state,
@@ -52,14 +60,33 @@ static void smsm_state_cb_hdlr(void *data, uint32_t old_state,
 						MODULE_NAME);
 		return;
 	}
-	if (new_state & SMSM_RESET)
+	if (new_state & SMSM_RESET) {
+		ss_restart_inprogress = true;
 		schedule_work(&riva_smsm_cb_work);
+	}
 }
 
 static void riva_fatal_fn(struct work_struct *work)
 {
-	if (!ss_restart_inprogress)
+	if (!enable_riva_ssr)
 		panic(MODULE_NAME ": Watchdog bite received from Riva");
+	else
+		subsystem_restart("riva");
+}
+
+static irqreturn_t riva_wdog_bite_irq_hdlr(int irq, void *dev_id)
+{
+	int ret;
+
+	if (ss_restart_inprogress) {
+		pr_err("%s: Ignoring riva bite irq, restart in progress\n",
+						MODULE_NAME);
+		return IRQ_HANDLED;
+	}
+	disable_irq_nosync(RIVA_APSS_WDOG_BITE_RESET_RDY_IRQ);
+	ss_restart_inprogress = true;
+	ret = schedule_work(&riva_fatal_work);
+	return IRQ_HANDLED;
 }
 
 /* SMSM reset Riva */
@@ -71,17 +98,47 @@ static void smsm_riva_reset(void)
 	smsm_change_state(SMSM_APPS_STATE, SMSM_RESET, SMSM_RESET);
 }
 
+static void riva_post_bootup(struct work_struct *work)
+{
+	struct platform_device *pdev = wcnss_get_platform_device();
+	struct wcnss_wlan_config *pwlanconfig = wcnss_get_wlan_config();
+
+	pr_debug(MODULE_NAME ": Cancel APPS vote for Iris & Riva\n");
+
+	wcnss_wlan_power(&pdev->dev, pwlanconfig,
+		WCNSS_WLAN_SWITCH_OFF);
+}
+
 /* Subsystem handlers */
 static int riva_shutdown(const struct subsys_data *subsys)
 {
-	/* TODO for phase 3 */
+	pil_force_shutdown("wcnss");
+	flush_delayed_work(&cancel_vote_work);
+
 	return 0;
 }
 
 static int riva_powerup(const struct subsys_data *subsys)
 {
-	/* TODO for phase 3 */
-	return 0;
+	struct platform_device *pdev = wcnss_get_platform_device();
+	struct wcnss_wlan_config *pwlanconfig = wcnss_get_wlan_config();
+	int    ret = -1;
+
+	if (pdev && pwlanconfig)
+		ret = wcnss_wlan_power(&pdev->dev, pwlanconfig,
+					WCNSS_WLAN_SWITCH_ON);
+	/* delay PIL operation, this SSR may be happening soon after kernel
+	 * resumes because of a SMSM RESET by Riva when APPS was suspended.
+	 * PIL fails to locate the images without this delay */
+	if (!ret) {
+		msleep(1000);
+		pil_force_boot("wcnss");
+	}
+	ss_restart_inprogress = false;
+	enable_irq(RIVA_APSS_WDOG_BITE_RESET_RDY_IRQ);
+	schedule_delayed_work(&cancel_vote_work, msecs_to_jiffies(5000));
+
+	return ret;
 }
 
 /* RAM segments for Riva SS;
@@ -103,8 +160,6 @@ static int riva_ramdump(int enable, const struct subsys_data *subsys)
 /* Riva crash handler */
 static void riva_crash_shutdown(const struct subsys_data *subsys)
 {
-	ss_restart_inprogress = true;
-
 	pr_err("%s: crash shutdown : %d\n", MODULE_NAME, riva_crash);
 	if (riva_crash != true)
 		smsm_riva_reset();
@@ -117,6 +172,42 @@ static struct subsys_data riva_8960 = {
 	.ramdump = riva_ramdump,
 	.crash_shutdown = riva_crash_shutdown
 };
+
+#ifdef FEATURE_PANTECH_WLAN_QCOM_PATCH // lee.eunsuk 20120404, subsys restart
+/* host driver interface to initiate WCNSS SSR */
+int wcnss_subsystem_restart()
+{
+	int ret;
+
+	if (ss_restart_inprogress) {
+		pr_err("%s: Ignoring riva subsystem restart req, restart in progress\n",
+						MODULE_NAME);
+		return 0;
+	}
+    printk ("wcnss_subsystem_restart\n");
+	ss_restart_inprogress = true;
+	ret = schedule_work(&riva_fatal_work);
+	return ret;
+}
+EXPORT_SYMBOL(wcnss_subsystem_restart);
+#endif //FEATURE_PANTECH_WLAN_QCOM_PATCH
+
+static int enable_riva_ssr_set(const char *val, struct kernel_param *kp)
+{
+	int ret;
+
+	ret = param_set_int(val, kp);
+	if (ret)
+		return ret;
+
+	if (enable_riva_ssr)
+		pr_info(MODULE_NAME ": Subsystem restart activated for riva.\n");
+
+	return 0;
+}
+
+module_param_call(enable_riva_ssr, enable_riva_ssr_set, param_get_int,
+			&enable_riva_ssr, S_IRUGO | S_IWUSR);
 
 static int __init riva_restart_init(void)
 {
@@ -134,6 +225,15 @@ static int __init riva_ssr_module_init(void)
 				" (%d)\n", MODULE_NAME, ret);
 		goto out;
 	}
+	ret = request_irq(RIVA_APSS_WDOG_BITE_RESET_RDY_IRQ,
+			riva_wdog_bite_irq_hdlr, IRQF_TRIGGER_HIGH,
+				"riva_wdog", NULL);
+
+	if (ret < 0) {
+		pr_err("%s: Unable to register for Riva bite interrupt"
+				" (%d)\n", MODULE_NAME, ret);
+		goto out;
+	}
 	ret = riva_restart_init();
 	if (ret < 0) {
 		pr_err("%s: Unable to register with ssr. (%d)\n",
@@ -147,6 +247,8 @@ static int __init riva_ssr_module_init(void)
 		ret = -ENOMEM;
 		goto out;
 	}
+	INIT_DELAYED_WORK(&cancel_vote_work, riva_post_bootup);
+
 	pr_info("%s: module initialized\n", MODULE_NAME);
 out:
 	return ret;

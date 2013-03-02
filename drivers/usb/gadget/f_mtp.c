@@ -67,6 +67,12 @@
 #define MTP_RESPONSE_OK             0x2001
 #define MTP_RESPONSE_DEVICE_BUSY    0x2019
 
+/*
+ * Windows Media Player media sync start/stop bug fix
+ * by Pantech Inc.(pooyi)
+ */
+#define FEATURE_ANDROID_PANTECH_MEDIAPLAYER_SYNC_BUG
+
 static const char mtp_shortname[] = "mtp_usb";
 
 struct mtp_dev {
@@ -410,15 +416,6 @@ static int mtp_create_bulk_endpoints(struct mtp_dev *dev,
 	ep->driver_data = dev;		/* claim the endpoint */
 	dev->ep_out = ep;
 
-	ep = usb_ep_autoconfig(cdev->gadget, out_desc);
-	if (!ep) {
-		DBG(cdev, "usb_ep_autoconfig for ep_out failed\n");
-		return -ENODEV;
-	}
-	DBG(cdev, "usb_ep_autoconfig for mtp ep_out got %s\n", ep->name);
-	ep->driver_data = dev;		/* claim the endpoint */
-	dev->ep_out = ep;
-
 	ep = usb_ep_autoconfig(cdev->gadget, intr_desc);
 	if (!ep) {
 		DBG(cdev, "usb_ep_autoconfig for ep_intr failed\n");
@@ -504,7 +501,17 @@ requeue_req:
 	}
 
 	/* wait for a request to complete */
-	ret = wait_event_interruptible(dev->read_wq, dev->rx_done);
+	ret = wait_event_interruptible(dev->read_wq,
+				dev->rx_done || dev->state != STATE_BUSY);
+	if (dev->state == STATE_CANCELED) {
+		r = -ECANCELED;
+		if (!dev->rx_done)
+			usb_ep_dequeue(dev->ep_out, req);
+		spin_lock_irq(&dev->lock);
+		dev->state = STATE_CANCELED;
+		spin_unlock_irq(&dev->lock);
+		goto done;
+	}
 	if (ret < 0) {
 		r = ret;
 		usb_ep_dequeue(dev->ep_out, req);
@@ -1156,6 +1163,13 @@ static int mtp_function_set_alt(struct usb_function *f,
 
 	/* readers may be blocked waiting for us to go online */
 	wake_up(&dev->read_wq);
+
+#ifdef CONFIG_ANDROID_PANTECH_USB_MANAGER
+	if(dev && dev->function.hs_descriptors == hs_ptp_descs)
+		usb_interface_enum_cb(PTP_TYPE_FLAG);
+	else
+	usb_interface_enum_cb(MTP_TYPE_FLAG);
+#endif
 	return 0;
 }
 
