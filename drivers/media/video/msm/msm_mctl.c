@@ -28,10 +28,10 @@
 #include <linux/android_pmem.h>
 
 #include "msm.h"
-#include "msm_csid.h"
-#include "msm_csic.h"
-#include "msm_csiphy.h"
-#include "msm_ispif.h"
+#include "csi/msm_csid.h"
+#include "csi/msm_csic.h"
+#include "csi/msm_csiphy.h"
+#include "csi/msm_ispif.h"
 #include "msm_sensor.h"
 
 #ifdef CONFIG_MSM_CAMERA_DEBUG

@@ -19,7 +19,7 @@
 #include "msm_camera_i2c.h"
 
 #include "msm.h"
-#include "msm_ispif.h"
+#include "csi/msm_ispif.h"
 
 #ifdef CONFIG_PANTECH_CAMERA_TUNER
 #include "ptune_parser.h"

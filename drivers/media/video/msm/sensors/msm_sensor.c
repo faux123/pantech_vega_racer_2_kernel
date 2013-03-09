@@ -12,7 +12,7 @@
 
 #include "msm_sensor.h"
 #include "msm.h"
-#include "msm_ispif.h"
+#include "csi/msm_ispif.h"
 
 #ifdef CONFIG_MACH_MSM8960_STARQ
 #include "sensor_i2c.h"
