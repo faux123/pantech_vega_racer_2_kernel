@@ -581,7 +581,7 @@ static struct pll_vote_clk pll4_clk = {
 };
 
 static struct pll_vote_clk pll8_clk = {
-	.rate = 384000000,
+	.rate = 192000000,
 	.en_reg = BB_PLL_ENA_SC0_REG,
 	.en_mask = BIT(8),
 	.status_reg = BB_PLL8_STATUS_REG,
