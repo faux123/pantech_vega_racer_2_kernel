@@ -74,10 +74,10 @@
 
 #define STBY_KHZ		1
 
-#define MAX_VDD_SC    1350000 /* custom voltage */ 
-#define MIN_VDD_SC     800000 /* custom voltage */
+#define MAX_VDD_SC    1450000 /* custom voltage */ 
+#define MIN_VDD_SC     700000 /* custom voltage */
 #define HFPLL_NOMINAL_VDD	1050000
-#define HFPLL_LOW_VDD		 850000
+#define HFPLL_LOW_VDD		 800000
 #define HFPLL_LOW_VDD_PLL_L_MAX	0x28
 
 #define SECCLKAGD		BIT(4)
@@ -155,7 +155,7 @@ static struct scalable scalable_8960[] = {
 			.hfpll_base      = MSM_HFPLL_BASE + 0x200,
 			.aux_clk_sel     = MSM_ACC0_BASE  + 0x014,
 			.l2cpmr_iaddr    = L2CPUCPMR_IADDR,
-			.vreg[VREG_CORE] = { "krait0",     1300000 },
+			.vreg[VREG_CORE] = { "krait0",     1350000 },
 			.vreg[VREG_MEM]  = { "krait0_mem", 1150000,
 					     RPM_VREG_VOTER1,
 					     RPM_VREG_ID_PM8921_L24 },
@@ -283,7 +283,7 @@ static struct scalable scalable_8930[] = {
 			.hfpll_base      = MSM_HFPLL_BASE + 0x200,
 			.aux_clk_sel     = MSM_ACC0_BASE  + 0x014,
 			.l2cpmr_iaddr    = L2CPUCPMR_IADDR,
-			.vreg[VREG_CORE] = { "krait0",     1300000 },
+			.vreg[VREG_CORE] = { "krait0",     1350000 },
 			.vreg[VREG_MEM]  = { "krait0_mem", 1150000,
 					     RPM_VREG_VOTER1,
 					     RPM_VREG_ID_PM8921_L24 },
@@ -334,7 +334,7 @@ static struct scalable scalable_8627[] = {
 			.hfpll_base      = MSM_HFPLL_BASE + 0x200,
 			.aux_clk_sel     = MSM_ACC0_BASE  + 0x014,
 			.l2cpmr_iaddr    = L2CPUCPMR_IADDR,
-			.vreg[VREG_CORE] = { "krait0",     1300000 },
+			.vreg[VREG_CORE] = { "krait0",     1350000 },
 			.vreg[VREG_MEM]  = { "krait0_mem", 1150000,
 					     RPM_VREG_VOTER1,
 					     RPM_VREG_ID_PM8921_L24 },
